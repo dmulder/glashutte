@@ -107,6 +107,7 @@ object InputDiagnostics {
     @Volatile private var lastHitPath = Path.TRACKPAD
     @Volatile private var cursorNdc = "(unknown)"
     @Volatile private var activePath: Path? = null
+    @Volatile private var displayDump: String? = null
     private var scrollLoggedAtMs = 0L
     private var lastFailLogAtMs = 0L
 
@@ -267,6 +268,22 @@ object InputDiagnostics {
     }
 
     fun activeTest(): Path? = activePath
+
+    /** `dumpsys` excerpts for the workspace's displays, fetched from the helper on request. */
+    fun displayDump(text: String?) {
+        displayDump = text
+    }
+
+    /** Worst stage status on [path] (FAIL > WARN > PENDING > OK), for colouring a summary line. */
+    fun worstStatus(path: Path): Status {
+        val all = stages(path).map { it.status }
+        return when {
+            Status.FAIL in all -> Status.FAIL
+            Status.WARN in all -> Status.WARN
+            Status.PENDING in all -> Status.PENDING
+            else -> Status.OK
+        }
+    }
 
     // ----------------------------------------------------------------------------------------
     // Hit-testing
@@ -621,6 +638,7 @@ object InputDiagnostics {
                 if (timeline.isEmpty()) sb.append("  (nothing yet)\n") else timeline.forEach { sb.append("  ").append(it).append('\n') }
             }
         }
+        displayDump?.let { sb.append("display dump:\n").append(it.prependIndent("  ")).append('\n') }
         val remote = helperReport
         sb.append("helper self-report")
         if (remote != null) sb.append(" (${(now - helperReportAtMs) / 1000}s ago)")
@@ -670,7 +688,7 @@ object InputDiagnostics {
         phoneScene = "unknown (the phone screen has not been shown yet)"; trackpadVisible = null
         devices = emptyList(); mouseNames = emptyList(); keyboardNames = emptyList(); devicesScanned = false
         typingTarget = "none"; typingTargetDisplay = -1; lastHitPath = Path.TRACKPAD
-        cursorNdc = "(unknown)"; activePath = null; scrollLoggedAtMs = 0L; lastFailLogAtMs = 0L
+        cursorNdc = "(unknown)"; activePath = null; displayDump = null; scrollLoggedAtMs = 0L; lastFailLogAtMs = 0L
         synchronized(lock) {
             timeline.clear()
             paths.keys.forEach { paths[it] = PathState() }

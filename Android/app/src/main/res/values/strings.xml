@@ -13,8 +13,19 @@
     <string name="privilege_title_working">Setting things up…</string>
 
     <string name="privilege_msg_unsupported">Needs Android 11 or newer. Glashutte activates a shell-uid helper through Wireless Debugging, an Android 11+ feature.</string>
-    <string name="privilege_msg_wireless_debugging">Enable Wireless Debugging in Developer options, then return — Glashutte reconnects automatically. If Developer options is missing, open About phone (or Software information) and tap “Build number” seven times to unlock it.</string>
-    <string name="privilege_msg_pair">Enable Wireless Debugging in Developer options and tap “Pair device with a pairing code”. If Developer options is missing, open About phone (or Software information) and tap “Build number” seven times to unlock it. With the pair dialog still in front, pull the notification shade down over it and type the 6-digit code into Glashutte\'s pairing notification — that way the dialog never goes to the background, which is what mDNS needs.</string>
+    <string name="privilege_msg_wireless_debugging">1. Make sure the phone is on Wi-Fi (Wireless debugging needs it).\n2. Settings &gt; Developer options &gt; turn Wireless debugging ON. If Developer options is missing: Settings &gt; About phone &gt; tap “Build number” seven times.\n3. Come back to Glashutte; it reconnects by itself.</string>
+    <string name="privilege_manual_toggle">Pair here instead (type the code in this app)</string>
+    <string name="privilege_manual_pair_help">Use this if the notification does not appear or pairing keeps failing. Put Settings and Glashutte side by side in split-screen so the “Pair device with a pairing code” dialog stays open, then type the 6-digit code and the “IP address &amp; Port” shown in that dialog (for example 192.168.1.23:37123) and tap Pair.</string>
+    <string name="privilege_manual_connect_help">After pairing, if Glashutte cannot find the connect port by itself, type the “IP address &amp; Port” shown on the main Wireless debugging screen (a different port from the pairing one) and tap Connect.</string>
+    <string name="privilege_pair_endpoint_hint">Pairing IP address &amp; port, e.g. 192.168.1.23:37123</string>
+    <string name="privilege_connect_endpoint_hint">Connect IP address &amp; port, e.g. 192.168.1.23:41234</string>
+    <string name="privilege_pair_now">Pair</string>
+    <string name="privilege_connect_now">Connect</string>
+    <string name="privilege_open_diagnostics">Open Diagnostics (shows why the helper is not connected)</string>
+    <string name="privilege_why_it_matters">Until this is done, nothing can be sent into apps on the glasses: the trackpad is hidden and the mouse and keyboard do nothing.</string>
+    <string name="privilege_failure_prefix">Last attempt failed: %1$s</string>
+    <string name="privilege_notifications_off">Notifications are switched off for Glashutte, so the pairing prompt cannot appear. Turn them on in Settings, or use “Pair here instead” below.</string>
+    <string name="privilege_msg_pair">One-time pairing, about a minute:\n1. Phone on Wi-Fi. Settings &gt; Developer options &gt; Wireless debugging ON.\n2. Tap “Pair device with a pairing code”. Leave that dialog open.\n3. Pull the notification shade down over the dialog, tap “Pair” in Glashutte\'s notification and type the 6-digit code.\nNo USB cable or computer is needed. If no notification appears, or it fails, use “Pair here instead” below.</string>
     <string name="privilege_msg_discovering">Looking for the local ADB service…</string>
     <string name="privilege_msg_connecting">Connecting to the local ADB service…</string>
     <string name="privilege_msg_starting">Starting the privileged helper…</string>

@@ -1254,13 +1254,38 @@ object WorkspaceController {
     fun removeRecordingListener(l: (recording: Boolean) -> Unit) { recordingListeners.remove(l) }
 
     /** Move the workspace cursor by a fraction of the touchpad's width. */
-    fun moveCursor(dxFraction: Float, dyFraction: Float) {
-        renderer?.moveCursor(dxFraction, dyFraction)
+    fun moveCursor(
+        dxFraction: Float,
+        dyFraction: Float,
+        source: io.github.dmulder.glashutte.glasses.InputDiagnostics.Path =
+            io.github.dmulder.glashutte.glasses.InputDiagnostics.Path.TRACKPAD,
+    ) {
+        val r = renderer
+        if (r == null) {
+            io.github.dmulder.glashutte.glasses.InputDiagnostics.note(source, "noRenderer", "moveCursor")
+            return
+        }
+        r.moveCursor(dxFraction, dyFraction, source)
     }
 
+    /**
+     * Called (on the GL thread) when a click is routed into an app window, so the phone side can
+     * make that app the target for physical-keyboard input. Args: display id, package name.
+     */
+    @Volatile var typingTargetChanged: ((displayId: Int, packageName: String) -> Unit)? = null
+
     /** Scroll the screen under the cursor by a fraction of the touchpad's height. */
-    fun scroll(dyFraction: Float) {
-        renderer?.requestScroll(dyFraction)
+    fun scroll(
+        dyFraction: Float,
+        source: io.github.dmulder.glashutte.glasses.InputDiagnostics.Path =
+            io.github.dmulder.glashutte.glasses.InputDiagnostics.Path.TRACKPAD,
+    ) {
+        val r = renderer
+        if (r == null) {
+            io.github.dmulder.glashutte.glasses.InputDiagnostics.note(source, "noRenderer", "scroll")
+            return
+        }
+        r.requestScroll(dyFraction, source)
     }
 
     /**
@@ -1282,8 +1307,18 @@ object WorkspaceController {
     }
 
     /** Register a cursor click in the workspace. */
-    fun click() {
-        renderer?.cursorClick()
+    fun click(
+        source: io.github.dmulder.glashutte.glasses.InputDiagnostics.Path =
+            io.github.dmulder.glashutte.glasses.InputDiagnostics.Path.TRACKPAD,
+    ) {
+        val r = renderer
+        if (r == null) {
+            io.github.dmulder.glashutte.glasses.InputDiagnostics.note(
+                source, "noRenderer", "click dropped: no workspace renderer attached", always = true,
+            )
+            return
+        }
+        r.cursorClick(source)
     }
 
     /** Cancel an in-flight press (second finger lands, scroll/pinch takes over). */
@@ -1304,6 +1339,9 @@ object WorkspaceController {
     fun registerGlashutteDisplay(displayId: Int) {
         if (displayId >= 0) glashutteDisplayIds.add(displayId)
     }
+
+    /** Snapshot of Glashutte's live virtual display ids (for diagnostics). Any thread. */
+    fun glashutteDisplayIdList(): List<Int> = glashutteDisplayIds.toList().sorted()
 
     /** True if [displayId] is one of Glashutte's own virtual displays. Any thread. */
     fun isGlashutteDisplay(displayId: Int): Boolean = glashutteDisplayIds.contains(displayId)

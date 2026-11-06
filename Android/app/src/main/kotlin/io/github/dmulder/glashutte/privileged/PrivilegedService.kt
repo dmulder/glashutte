@@ -177,6 +177,7 @@ object PrivilegedService {
         }
         if (next == state) {
             InputDiagnostics.helperState(next.name, next == State.READY, lastFailure)
+            if (failure != null) notifyListeners()
             return
         }
         Log.i(TAG, "state: $state -> $next")
@@ -511,12 +512,14 @@ object PrivilegedService {
         }
         override fun onMouseDelta(dx: Int, dy: Int, wheel: Int) {
             // Raw evdev mouse deltas — never quantised to the phone-screen edge.
+            InputDiagnostics.note(InputDiagnostics.Path.MOUSE, "evdevDelta", "dx=$dx dy=$dy wheel=$wheel")
             mainHandler.post { mouseDeltaHandler?.invoke(dx, dy, wheel) }
         }
         override fun onMouseButton(code: Int, pressed: Boolean) {
             // With the helper holding EVIOCGRAB on the mouse, button events never
             // reach `dispatchGenericMotionEvent` either — so we have to forward
             // them here and the app dispatches workspace clicks ourselves.
+            InputDiagnostics.note(InputDiagnostics.Path.MOUSE, "evdevButton", "code=$code pressed=$pressed", always = true)
             mainHandler.post { mouseButtonHandler?.invoke(code, pressed) }
         }
     }

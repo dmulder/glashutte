@@ -26,6 +26,9 @@ import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 import javax.microedition.khronos.egl.EGLConfig
 import io.github.dmulder.glashutte.glasses.GlassesDiagnostics
+import io.github.dmulder.glashutte.glasses.InputDiagnostics
+import io.github.dmulder.glashutte.glasses.InputDiagnostics.Path as InputPath
+import io.github.dmulder.glashutte.glasses.InputDiagnostics.Route as InputRoute
 import io.github.dmulder.glashutte.glasses.PanelSpec
 import io.github.dmulder.glashutte.glasses.PanelSpecs
 import io.github.dmulder.glashutte.glasses.ProjectionExperiments
@@ -182,6 +185,7 @@ class WorkspaceRenderer(
     @Volatile private var cursorX = 0f
     @Volatile private var cursorY = 0f
     @Volatile private var cursorClickPending = false
+    @Volatile private var cursorClickSource = InputPath.TRACKPAD
     private var cursorFlashFrames = 0
 
     /** Last time the touchpad sent any cursor-affecting input; drives the idle hide. */
@@ -337,6 +341,7 @@ class WorkspaceRenderer(
     /** Reused output bitmap — worker thread only. */
     private var captureBitmap: Bitmap? = null
     @Volatile private var pendingScroll = 0f
+    @Volatile private var pendingScrollSource = InputPath.TRACKPAD
 
     /**
      * Two-finger pan deltas (fractions of trackpad width / height) waiting to be applied to
@@ -701,8 +706,10 @@ class WorkspaceRenderer(
     fun isRecording(): Boolean = recording
 
     /** Accumulate a scroll delta (fraction of the touchpad height). Safe from any thread. */
-    fun requestScroll(dyFraction: Float) {
+    fun requestScroll(dyFraction: Float, source: InputPath = InputPath.TRACKPAD) {
         pendingScroll += dyFraction
+        pendingScrollSource = source
+        InputDiagnostics.note(source, "scrollQueued")
         noteInput()
     }
 
@@ -803,10 +810,12 @@ class WorkspaceRenderer(
     /** Counter for throttling the per-move cursor log so logcat stays readable. */
     private var moveLogCounter: Int = 0
 
-    fun moveCursor(dxFraction: Float, dyFraction: Float) {
+    fun moveCursor(dxFraction: Float, dyFraction: Float, source: InputPath = InputPath.TRACKPAD) {
         val sens = WorkspaceController.cursorSensitivity
         cursorX = (cursorX + dxFraction * sens).coerceIn(-1f, 1f)
         cursorY = (cursorY - dyFraction * sens).coerceIn(-1f, 1f)
+        InputDiagnostics.note(source, "cursor")
+        InputDiagnostics.cursor(cursorX, cursorY)
         // Log every Nth move so we can see the workspace NDC reach against the
         // input deltas. Includes the input dx/dy so it's clear how much input
         // mapped to how much cursor delta on the way to its current position.
@@ -821,8 +830,10 @@ class WorkspaceRenderer(
     }
 
     /** Register a cursor click. Safe to call from any thread. */
-    fun cursorClick() {
+    fun cursorClick(source: InputPath = InputPath.TRACKPAD) {
+        cursorClickSource = source
         cursorClickPending = true
+        InputDiagnostics.note(source, "clickQueued", "cursor=(${"%.3f".format(cursorX)},${"%.3f".format(cursorY)})", always = true)
         noteInput()
     }
 
@@ -1278,15 +1289,21 @@ class WorkspaceRenderer(
         }
         if (cursorClickPending) {
             cursorClickPending = false
+            val clickSource = cursorClickSource
+            InputDiagnostics.note(clickSource, "clickProcessed")
             cursorFlashFrames = CURSOR_FLASH_FRAMES
             // A tap on chrome / edge that immediately enters drag or resize
             // (via tap-and-drag) shouldn't also fire as a normal click — the
             // gesture has already latched onto the window. Skip the click
             // in those cases.
-            if (dragWindow == null && resizeWindow == null) handleClick()
+            if (dragWindow == null && resizeWindow == null) {
+                handleClick(clickSource)
+            } else {
+                InputDiagnostics.note(clickSource, "clickSkippedDrag", "a window drag/resize was in progress", always = true)
+            }
         }
         if (pendingScroll != 0f) {
-            handleScroll(pendingScroll)
+            handleScroll(pendingScroll, pendingScrollSource)
             pendingScroll = 0f
         }
         if (pendingPanX != 0f || pendingPanY != 0f) {
@@ -2781,12 +2798,65 @@ class WorkspaceRenderer(
         return true
     }
 
-    private fun handleClick() {
+    private fun noteHit(
+        kind: String,
+        source: InputPath,
+        route: InputRoute,
+        reason: String,
+        screenIdx: Int,
+        px: FloatArray?,
+        window: AppWindow? = null,
+        localX: Int = 0,
+        localY: Int = 0,
+        roundTrip: Float = Float.NaN,
+    ) {
+        InputDiagnostics.recordHit(
+            InputDiagnostics.HitRecord(
+                path = source,
+                kind = kind,
+                route = route,
+                reason = reason,
+                cursorNdc = "(${"%.3f".format(cursorX)},${"%.3f".format(cursorY)})",
+                screenIdx = screenIdx,
+                slotPx = if (px == null) "-" else "(${px[0].toInt()},${px[1].toInt()})",
+                windowPkg = window?.packageName,
+                windowDisplayId = window?.displayId,
+                localX = localX,
+                localY = localY,
+                displaySize = if (window == null) "-" else "${window.ui.width}x${window.ui.height}",
+                roundTripErr = roundTrip,
+                projection = "layout=${layout.displayName} viewMode=$viewMode zoom=${"%.3f".format(activeZoom())}",
+            ),
+        )
+    }
+
+    /**
+     * Project the slot pixel [px] back through the current view-projection and return how far
+     * (in NDC) it lands from the cursor. ~0 means hit-testing and drawing agree — it guards
+     * the hit-test against the projection scaling that FOV decoupling applies. Only flat,
+     * un-yawed screens are checked; others report NaN.
+     */
+    private fun projectionRoundTrip(screen: Screen, px: FloatArray): Float {
+        if (screen.curveDeg > 0f || screen.yawDeg != 0f) return Float.NaN
+        val r = Screen.worldRect(screen, desktopHalfWidth, desktopHalfHeight)
+        val wx = r[0] - r[3] / 2f + px[0] / screen.contentWidthPx * r[3]
+        val wy = r[1] + r[4] / 2f - px[1] / screen.contentHeightPx * r[4]
+        val inPt = floatArrayOf(wx, wy, r[2], 1f)
+        val out = FloatArray(4)
+        Matrix.multiplyMV(out, 0, viewProjection, 0, inPt, 0)
+        if (abs(out[3]) < 1e-6f) return Float.NaN
+        val nx = out[0] / out[3]
+        val ny = out[1] / out[3]
+        return maxOf(abs(nx - cursorX), abs(ny - cursorY))
+    }
+
+    private fun handleClick(source: InputPath) {
         // A click while a drag is in flight resolves the drag instead of routing
         // into any window/Presentation. Dropping on a slot's wallpaper area
         // pins a shortcut; dropping anywhere else (taskbar, drawer, a window)
         // cancels — same as a desktop drag-and-drop.
         if (WorkspaceController.armedDrawerDrag != null) {
+            noteHit("click", source, InputRoute.SLOT_UI, "resolving an armed drawer drag", -1, null)
             handleArmedDrop()
             return
         }
@@ -2808,17 +2878,27 @@ class WorkspaceRenderer(
         if (toolbarExpanded) {
             val hit = toolbarButtonAtCursor()
             if (hit != null) {
+                noteHit("click", source, InputRoute.SLOT_UI, "in-view toolbar button '${hit.label}'", -1, null)
                 Log.i(TAG, "toolbar button '${hit.label}' clicked")
                 mainHandler.post { hit.action() }
                 toolbarLastShownMs = android.os.SystemClock.uptimeMillis()
                 return
             }
         }
-        val screenIdx = screenIndexUnderCursor() ?: return
+        val screenIdx = screenIndexUnderCursor() ?: run {
+            noteHit("click", source, InputRoute.MISS, "cursor ray does not hit any screen (layout ${layout.displayName})", -1, null)
+            return
+        }
         val screen = layout.screens[screenIdx]
-        val displayId = screenDisplayId(screenIdx) ?: return
-        val px = cursorToRectPx(screen) ?: return
-        routeClickOnSlot(screenIdx, screen, displayId, px)
+        val displayId = screenDisplayId(screenIdx) ?: run {
+            noteHit("click", source, InputRoute.MISS, "screen $screenIdx has no UI display yet", screenIdx, null)
+            return
+        }
+        val px = cursorToRectPx(screen) ?: run {
+            noteHit("click", source, InputRoute.MISS, "screen $screenIdx found but cursor maps outside its rect", screenIdx, null)
+            return
+        }
+        routeClickOnSlot(screenIdx, screen, displayId, px, source)
     }
 
     /**
@@ -2836,6 +2916,7 @@ class WorkspaceRenderer(
         screen: Screen,
         @Suppress("UNUSED_PARAMETER") displayId: Int,
         px: FloatArray,
+        source: InputPath,
     ) {
         val ui = if (screenIdx == 0) desktop else extraScreens.getOrNull(screenIdx - 1)
         val anyModalOpen = (
@@ -2873,13 +2954,24 @@ class WorkspaceRenderer(
                 if (inChrome) {
                     // Chrome hit — fall through to the slot's Presentation
                     // dispatchTap so the ImageButtons receive the click in-process.
+                    noteHit("click", source, InputRoute.SLOT_UI, "window chrome of ${window.packageName}", screenIdx, px)
                 } else {
                     val act = window.activityRect()
                     val uF = ((px[0] - act[0]) / act[2].toFloat()).coerceIn(0f, 1f)
                     val vF = ((px[1] - act[1]) / act[3].toFloat()).coerceIn(0f, 1f)
-                    val localX = (uF * window.ui.width).toInt()
-                    val localY = (vF * window.ui.height).toInt()
-                    WorkspaceController.appTap?.invoke(winDisplayId, localX, localY)
+                    val localX = (uF * window.ui.width).toInt().coerceIn(0, window.ui.width - 1)
+                    val localY = (vF * window.ui.height).toInt().coerceIn(0, window.ui.height - 1)
+                    val tap = WorkspaceController.appTap
+                    if (tap == null) {
+                        noteHit("click", source, InputRoute.MISS, "no appTap hook wired (app not initialised)", screenIdx, px, window, localX, localY)
+                    } else {
+                        noteHit(
+                            "click", source, InputRoute.APP, "injecting", screenIdx, px, window, localX, localY,
+                            projectionRoundTrip(screen, px),
+                        )
+                        WorkspaceController.typingTargetChanged?.invoke(winDisplayId, window.packageName)
+                        tap.invoke(winDisplayId, localX, localY)
+                    }
                     Log.d(
                         TAG,
                         "handleClick → window ${window.packageName} display=$winDisplayId " +
@@ -2890,6 +2982,11 @@ class WorkspaceRenderer(
             }
         }
         if (ui != null) {
+            noteHit(
+                "click", source, InputRoute.SLOT_UI,
+                if (anyModalOpen) "a drawer / settings / audio panel is open on this screen" else "desktop (no app window under the cursor)",
+                screenIdx, px,
+            )
             mainHandler.post { ui.dispatchTap(px[0], px[1]) }
             Log.d(
                 TAG,
@@ -2935,9 +3032,12 @@ class WorkspaceRenderer(
      * (when open) is a child view inside that screen's Presentation, so its `GridView`
      * gets the scroll naturally via the same input-injection path — no special case.
      */
-    private fun handleScroll(dyFraction: Float) {
+    private fun handleScroll(dyFraction: Float, source: InputPath) {
         val vScroll = dyFraction * WorkspaceController.scrollSensitivity
-        val screenIdx = screenIndexUnderCursor() ?: return
+        val screenIdx = screenIndexUnderCursor() ?: run {
+            noteHit("scroll", source, InputRoute.MISS, "cursor ray does not hit any screen", -1, null)
+            return
+        }
         val screen = layout.screens[screenIdx]
         val px = cursorToRectPx(screen) ?: return
         val ui = if (screenIdx == 0) desktop else extraScreens.getOrNull(screenIdx - 1)
@@ -2963,8 +3063,9 @@ class WorkspaceRenderer(
                     val act = window.activityRect()
                     val uF = ((px[0] - act[0]) / act[2].toFloat()).coerceIn(0f, 1f)
                     val vF = ((px[1] - act[1]) / act[3].toFloat()).coerceIn(0f, 1f)
-                    val localX = (uF * window.ui.width).toInt()
-                    val localY = (vF * window.ui.height).toInt()
+                    val localX = (uF * window.ui.width).toInt().coerceIn(0, window.ui.width - 1)
+                    val localY = (vF * window.ui.height).toInt().coerceIn(0, window.ui.height - 1)
+                    noteHit("scroll", source, InputRoute.APP, "injecting v=%.2f".format(vScroll), screenIdx, px, window, localX, localY)
                     WorkspaceController.appScroll?.invoke(winDisplayId, localX, localY, vScroll)
                     return
                 }

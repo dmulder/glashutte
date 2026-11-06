@@ -17,6 +17,9 @@ import android.text.TextWatcher
 import android.util.Log
 import android.view.InputDevice
 import android.view.KeyEvent
+import io.github.dmulder.glashutte.glasses.InputDiagnostics
+import io.github.dmulder.glashutte.privileged.AdbDiscovery
+import io.github.dmulder.glashutte.glasses.InputExperiments
 import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
@@ -112,6 +115,10 @@ class MainActivity : ComponentActivity() {
 
     private fun inputManager(): InputManager = getSystemService(InputManager::class.java)
 
+    private fun describeDevice(d: InputDevice): String =
+        "id=${d.id} '${d.name}' sources=0x${Integer.toHexString(d.sources)} kbType=${d.keyboardType}" +
+            (if (d.isVirtual) " virtual" else "")
+
     /**
      * Scan every attached input device for a real physical keyboard and tell
      * [PrivilegedService] whether to keep the global hotkey spy alive.
@@ -132,7 +139,10 @@ class MainActivity : ComponentActivity() {
     private fun refreshKeyboardPresence() {
         val current = mutableSetOf<Int>()
         var anyMouse = false
+        val mouseNames = mutableListOf<String>()
+        val inventory = mutableListOf<String>()
         for (id in InputDevice.getDeviceIds()) {
+            InputDevice.getDevice(id)?.let { inventory.add(describeDevice(it)) }
             val dev = InputDevice.getDevice(id) ?: continue
             val name = dev.name
             if (dev.isVirtual) {
@@ -141,9 +151,10 @@ class MainActivity : ComponentActivity() {
             }
             // Track real mice so the monitor stays alive for the raw-evdev mouse
             // delta path even when no keyboard is attached.
-            if ((dev.sources and InputDevice.SOURCE_MOUSE) != 0) {
+            if ((dev.sources and InputDevice.SOURCE_MOUSE) == InputDevice.SOURCE_MOUSE) {
                 Log.i("Glashutte/Main", "mouse present: id=$id name='$name'")
                 anyMouse = true
+                mouseNames.add(name)
             }
             if ((dev.sources and InputDevice.SOURCE_KEYBOARD) == 0) continue
             if (dev.keyboardType != InputDevice.KEYBOARD_TYPE_ALPHABETIC) {
@@ -174,6 +185,11 @@ class MainActivity : ComponentActivity() {
             Log.i("Glashutte/Main", "keyboard present: id=$id name='$name'")
             current.add(id)
         }
+        InputDiagnostics.deviceInventory(
+            inventory,
+            mouseNames,
+            current.mapNotNull { InputDevice.getDevice(it)?.name },
+        )
         PrivilegedService.setHotkeyMonitoringEnabled(current.isNotEmpty() || anyMouse)
 
         // Proactive glasses-USB rescan around keyboard-connect events. The first
@@ -303,6 +319,15 @@ class MainActivity : ComponentActivity() {
             )
 
         binding.setupButton.setOnClickListener { onSetupAction() }
+        binding.wizardManualToggle.setOnClickListener {
+            binding.wizardManualBox.visibility =
+                if (binding.wizardManualBox.visibility == View.VISIBLE) View.GONE else View.VISIBLE
+        }
+        binding.wizardPairNow.setOnClickListener { submitManualPair() }
+        binding.wizardConnectNow.setOnClickListener { submitManualConnect() }
+        binding.wizardDiagnostics.setOnClickListener {
+            startActivity(Intent(this, DiagnosticsActivity::class.java))
+        }
         binding.viewModeButton.setOnClickListener { toggleViewMode() }
         // Long-press = full glasses reconnect (helper + display + head tracking), a heavier
         // recovery than the tap's DOF-only retry.
@@ -375,16 +400,46 @@ class MainActivity : ComponentActivity() {
             }
         }
 
-        binding.trackpad.onMove = { dx, dy -> WorkspaceController.moveCursor(dx, dy) }
-        binding.trackpad.onTap = { WorkspaceController.click() }
+        val trackpadPath = InputDiagnostics.Path.TRACKPAD
+        binding.trackpad.setOnTouchListener { _, ev ->
+            InputDiagnostics.note(
+                trackpadPath, "touch",
+                "${MotionEvent.actionToString(ev.actionMasked)} (${ev.x.toInt()},${ev.y.toInt()}) ptrs=${ev.pointerCount}",
+            )
+            false
+        }
+        binding.trackpad.onMove = { dx, dy ->
+            InputDiagnostics.note(trackpadPath, "move")
+            WorkspaceController.moveCursor(dx, dy, trackpadPath)
+        }
+        binding.trackpad.onTap = {
+            InputDiagnostics.note(trackpadPath, "tap", always = true)
+            WorkspaceController.click(trackpadPath)
+        }
         binding.trackpad.onTwoFingerDrag = { dx, dy ->
+            InputDiagnostics.note(trackpadPath, "twoFingerDrag")
             WorkspaceController.twoFingerDrag(dx, dy)
         }
-        binding.trackpad.onZoom = { scale -> WorkspaceController.pinch(scale) }
-        binding.trackpad.onDragStart = { WorkspaceController.beginDrag() }
-        binding.trackpad.onDragEnd = { WorkspaceController.endDrag() }
+        binding.trackpad.onZoom = { scale ->
+            InputDiagnostics.note(trackpadPath, "pinch")
+            WorkspaceController.pinch(scale)
+        }
+        binding.trackpad.onDragStart = {
+            InputDiagnostics.note(trackpadPath, "dragStart", always = true)
+            WorkspaceController.beginDrag()
+        }
+        binding.trackpad.onDragEnd = {
+            InputDiagnostics.note(trackpadPath, "dragEnd", always = true)
+            WorkspaceController.endDrag()
+        }
         binding.trackpad.onDragCancel = { WorkspaceController.cancelDrag() }
-        binding.trackpad.onLongPress = { WorkspaceController.longPress() }
+        binding.trackpad.onLongPress = {
+            InputDiagnostics.note(trackpadPath, "longPress", always = true)
+            WorkspaceController.longPress()
+        }
+        WorkspaceController.typingTargetChanged = { displayId, pkg ->
+            InputDiagnostics.typingTarget(displayId, pkg)
+        }
         // Cursor motion + clicks come from the privileged helper's raw-evdev path
         // (PrivilegedService.mouseDeltaHandler); only the wheel still routes through
         // dispatchGenericMotionEvent below. Pointer Capture would also give raw,
@@ -439,6 +494,7 @@ class MainActivity : ComponentActivity() {
         WorkspaceController.onAppTextFieldFocused = { displayId ->
             mainHandler.post {
                 focusedAppDisplayId = displayId
+                InputDiagnostics.typingTarget(displayId, "text field focused (accessibility)")
                 showKeyboard()
             }
         }
@@ -861,15 +917,72 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun showScene(showWizard: Boolean, showWaiting: Boolean) {
+        InputDiagnostics.phoneScene(
+            when {
+                showWizard -> "setup wizard (helper state ${PrivilegedService.state}" +
+                    "${if (PrivilegedService.lastFailure.isEmpty()) "" else ": " + PrivilegedService.lastFailure})"
+                showWaiting -> "waiting for the glasses display (helper ready, no glasses workspace yet)"
+                else -> "trackpad"
+            },
+            trackpadShown = !showWizard && !showWaiting,
+        )
         binding.wizardScene.visibility = if (showWizard) View.VISIBLE else View.GONE
         binding.waitingScene.visibility = if (showWaiting) View.VISIBLE else View.GONE
         binding.mainScene.visibility =
             if (!showWizard && !showWaiting) View.VISIBLE else View.GONE
     }
 
+    private fun submitManualPair() {
+        val code = binding.wizardPairCode.text.toString().filter(Char::isDigit)
+        val endpoint = AdbDiscovery.parseEndpoint(binding.wizardPairEndpoint.text.toString())
+        if (code.length != 6) {
+            Toast.makeText(this, "Enter the 6-digit pairing code", Toast.LENGTH_SHORT).show()
+            return
+        }
+        if (endpoint == null) {
+            Toast.makeText(this, "Enter the pairing IP address and port, like 192.168.1.23:37123", Toast.LENGTH_LONG).show()
+            return
+        }
+        Toast.makeText(this, "Pairing…", Toast.LENGTH_SHORT).show()
+        PrivilegedService.activate(code, endpoint) { ok ->
+            runOnUiThread {
+                Toast.makeText(
+                    this,
+                    if (ok) "Paired. Connecting…" else getString(R.string.privilege_pair_failed),
+                    Toast.LENGTH_LONG,
+                ).show()
+            }
+        }
+    }
+
+    private fun submitManualConnect() {
+        val endpoint = AdbDiscovery.parseEndpoint(binding.wizardConnectEndpoint.text.toString())
+        if (endpoint == null) {
+            Toast.makeText(this, "Enter the connect IP address and port, like 192.168.1.23:41234", Toast.LENGTH_LONG).show()
+            return
+        }
+        PrivilegedService.setManualConnectEndpoint(endpoint.host, endpoint.port)
+        PrivilegedService.ensureRunning()
+        Toast.makeText(this, "Connecting to ${endpoint.host}:${endpoint.port}…", Toast.LENGTH_SHORT).show()
+    }
+
     private fun populateWizard(title: Int, message: Int, actionLabel: Int?) {
         binding.wizardTitle.setText(title)
-        binding.wizardMessage.setText(message)
+        val state = PrivilegedService.state
+        val actionable = state == State.NEEDS_PAIRING || state == State.NEEDS_WIRELESS_DEBUGGING
+        val text = StringBuilder(getString(message))
+        if (state != State.UNSUPPORTED) text.append("\n\n").append(getString(R.string.privilege_why_it_matters))
+        if (state == State.NEEDS_PAIRING &&
+            !androidx.core.app.NotificationManagerCompat.from(this).areNotificationsEnabled()
+        ) {
+            text.append("\n\n").append(getString(R.string.privilege_notifications_off))
+        }
+        binding.wizardMessage.text = text
+        val failure = PrivilegedService.lastFailure
+        binding.wizardFailure.visibility = if (failure.isEmpty() || state == State.UNSUPPORTED) View.GONE else View.VISIBLE
+        binding.wizardFailure.text = getString(R.string.privilege_failure_prefix, failure)
+        binding.wizardManualToggle.visibility = if (actionable) View.VISIBLE else View.GONE
+        if (!actionable) binding.wizardManualBox.visibility = View.GONE
         if (actionLabel == null) {
             binding.setupButton.visibility = View.GONE
         } else {
@@ -935,6 +1048,111 @@ class MainActivity : ComponentActivity() {
      * the BT mouse and starves the pseudo-root pairing field. See the onCreate note.
      * The privileged helper's EVIOCGRAB gets the raw deltas with no focus instead.)
      */
+    /**
+     * Physical (Bluetooth / USB) keyboard → the app window the cursor last clicked in.
+     *
+     * Android delivers hardware keys to the focused window, and the focused window is this
+     * phone activity, never an app on the glasses' virtual display. Before this existed the
+     * only route into an app was the on-screen-IME text mirror, which needs the accessibility
+     * service to have seen a text field gain focus and cannot carry Enter, arrows, Tab, Esc or
+     * Ctrl/Shift combinations. Here each key transition is injected into the target display
+     * through the helper with its real meta state. Ctrl+Alt chords stay with the helper's
+     * hotkey spy, system keys stay with the system, and the drawer's own search keeps using
+     * the text field.
+     */
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        if (handlePhysicalKey(event)) return true
+        return super.dispatchKeyEvent(event)
+    }
+
+    private fun handlePhysicalKey(event: KeyEvent): Boolean {
+        val device = event.device
+        val kbPath = InputDiagnostics.Path.KEYBOARD
+        val physical = device != null && !device.isVirtual && event.isFromSource(InputDevice.SOURCE_KEYBOARD)
+        if (!physical) return false
+        val isDown = event.action == KeyEvent.ACTION_DOWN
+        if (isDown && event.repeatCount == 0) {
+            InputDiagnostics.note(
+                kbPath, "keyDown",
+                "${KeyEvent.keyCodeToString(event.keyCode)} meta=0x${Integer.toHexString(event.metaState)} from '${device?.name}'",
+            )
+        }
+        fun skip(reason: String): Boolean {
+            if (isDown && event.repeatCount == 0) InputDiagnostics.note(kbPath, "skipped", reason, always = true)
+            return false
+        }
+        if (!InputExperiments.forwardPhysicalKeys(this)) return skip("forwarding switched off in Diagnostics")
+        val ctrlAlt = KeyEvent.META_CTRL_ON or KeyEvent.META_ALT_ON
+        if ((event.metaState and ctrlAlt) == ctrlAlt) return skip("Ctrl+Alt chord left to the hotkey monitor")
+        when (event.keyCode) {
+            KeyEvent.KEYCODE_VOLUME_UP, KeyEvent.KEYCODE_VOLUME_DOWN, KeyEvent.KEYCODE_VOLUME_MUTE,
+            KeyEvent.KEYCODE_POWER, KeyEvent.KEYCODE_HOME, KeyEvent.KEYCODE_APP_SWITCH,
+            KeyEvent.KEYCODE_BRIGHTNESS_UP, KeyEvent.KEYCODE_BRIGHTNESS_DOWN,
+            -> return skip("system key ${KeyEvent.keyCodeToString(event.keyCode)} left to Android")
+        }
+        if (WorkspaceController.isDrawerOpen) return skip("app drawer is open: typing goes to its search")
+        val target = if (focusedAppDisplayId >= 0) focusedAppDisplayId else InputDiagnostics.typingTargetDisplay()
+        if (target < 0) return skip("no app window selected: click inside an app first")
+        if (!WorkspaceController.isGlashutteDisplay(target)) {
+            InputDiagnostics.typingTarget(-1, "")
+            return skip("the selected app window (display $target) no longer exists")
+        }
+        if (!InputDiagnostics.isHelperReady()) return skip("input helper not connected")
+        PrivilegedService.injectKey(target, event.keyCode, event.action, event.metaState)
+        if (isDown && event.repeatCount == 0) {
+            InputDiagnostics.note(kbPath, "forwarded", "${KeyEvent.keyCodeToString(event.keyCode)} -> display $target")
+        }
+        return true
+    }
+
+    private var lastMouseX = Float.NaN
+    private var lastMouseY = Float.NaN
+    private var lastMouseButtons = 0
+
+    /**
+     * Fallback for a mouse the helper's raw `/dev/input` path is not delivering (helper
+     * missing, nothing read, or the grab failed and the mouse is still reaching this window):
+     * drive the workspace cursor from the pointer events this window receives. The system
+     * pointer is clamped to the phone screen, so this is coarser than the raw path.
+     */
+    private fun mousePhoneWindowFallback(ev: MotionEvent) {
+        val mousePath = InputDiagnostics.Path.MOUSE
+        if (!InputExperiments.mousePhoneWindowFallback(this)) return
+        val rawDelivering = InputDiagnostics.count(mousePath, "evdevDelta") +
+            InputDiagnostics.count(mousePath, "evdevButton") > 0
+        if (rawDelivering) return
+        when (ev.actionMasked) {
+            MotionEvent.ACTION_HOVER_MOVE, MotionEvent.ACTION_MOVE -> {
+                if (!lastMouseX.isNaN()) {
+                    val dx = (ev.x - lastMouseX).toInt()
+                    val dy = (ev.y - lastMouseY).toInt()
+                    if (dx != 0 || dy != 0) {
+                        InputDiagnostics.note(mousePath, "activityDelta", "dx=$dx dy=$dy")
+                        PrivilegedService.mouseDeltaHandler?.invoke(dx, dy, 0)
+                    }
+                }
+                lastMouseX = ev.x
+                lastMouseY = ev.y
+            }
+            MotionEvent.ACTION_HOVER_ENTER, MotionEvent.ACTION_HOVER_EXIT -> {
+                lastMouseX = Float.NaN
+                lastMouseY = Float.NaN
+            }
+        }
+        val buttons = ev.buttonState
+        val changed = buttons xor lastMouseButtons
+        if (changed != 0) {
+            for ((flag, code) in listOf(MotionEvent.BUTTON_PRIMARY to 272, MotionEvent.BUTTON_SECONDARY to 273)) {
+                if ((changed and flag) != 0) {
+                    val pressed = (buttons and flag) != 0
+                    InputDiagnostics.note(mousePath, "activityButton", "code=$code pressed=$pressed", always = true)
+                    PrivilegedService.mouseButtonHandler?.invoke(code, pressed)
+                }
+            }
+            lastMouseButtons = buttons
+        }
+    }
+
     override fun dispatchGenericMotionEvent(ev: MotionEvent): Boolean {
         if (ev.isFromSource(InputDevice.SOURCE_MOUSE)) {
             @Suppress("ConstantConditionIf")
@@ -946,6 +1164,7 @@ class MainActivity : ComponentActivity() {
                 )
                 mouseDiagFrameCount++
             }
+            mousePhoneWindowFallback(ev)
             handleMouseEvent(ev)
             return true
         }
@@ -975,7 +1194,8 @@ class MainActivity : ComponentActivity() {
                              else        1f / (1f - v * MOUSE_ZOOM_GAIN)
                 WorkspaceController.pinch(factor)
             } else {
-                WorkspaceController.scroll(v * MOUSE_SCROLL_GAIN)
+                InputDiagnostics.note(InputDiagnostics.Path.MOUSE, "wheel", "v=$v")
+                WorkspaceController.scroll(v * MOUSE_SCROLL_GAIN, InputDiagnostics.Path.MOUSE)
             }
         }
         // All other mouse events (HOVER_MOVE, MOVE, BUTTON_PRESS / RELEASE) fall

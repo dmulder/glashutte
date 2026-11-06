@@ -22,7 +22,15 @@ class PairingInputReceiver : BroadcastReceiver() {
         val raw = results?.getCharSequence(PairingNotifier.KEY_PAIRING_CODE)?.toString().orEmpty()
         val code = raw.filter(Char::isDigit).take(6)
         Log.i(TAG, "pairing code from notification (len=${code.length})")
-        if (code.length != 6) return
+        io.github.dmulder.glashutte.glasses.InputDiagnostics.timelineEvent(
+            "pairing code entered in the notification (${code.length} digits)",
+        )
+        if (code.length != 6) {
+            io.github.dmulder.glashutte.glasses.InputDiagnostics.timelineEvent(
+                "pairing code ignored: expected 6 digits, got ${code.length}",
+            )
+            return
+        }
         PrivilegedService.activate(code) { ok ->
             Log.i(TAG, "pair from notification ok=$ok")
             if (ok) PairingNotifier.cancel(context)

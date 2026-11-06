@@ -31,10 +31,15 @@
             android:scaleType="fitCenter"
             android:src="@drawable/splash_bg" />
 
-        <LinearLayout
+        <ScrollView
             android:layout_width="match_parent"
             android:layout_height="0dp"
             android:layout_weight="1"
+            android:fillViewport="true">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
             android:gravity="center_horizontal"
             android:orientation="vertical"
             android:padding="24dp">
@@ -53,10 +58,21 @@
                 android:id="@+id/wizardMessage"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginBottom="20dp"
-                android:gravity="center"
+                android:layout_marginBottom="12dp"
+                android:gravity="start"
                 android:textColor="@color/text_dim"
                 android:textSize="14sp" />
+
+            <TextView
+                android:id="@+id/wizardFailure"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="12dp"
+                android:background="#33FFB300"
+                android:padding="10dp"
+                android:textColor="#FFD54F"
+                android:textSize="13sp"
+                android:visibility="gone" />
 
             <Button
                 android:id="@+id/setupButton"
@@ -64,7 +80,89 @@
                 android:layout_height="wrap_content"
                 android:visibility="gone" />
 
+            <Button
+                android:id="@+id/wizardManualToggle"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="@string/privilege_manual_toggle"
+                android:visibility="gone" />
+
+            <LinearLayout
+                android:id="@+id/wizardManualBox"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:visibility="gone">
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:text="@string/privilege_manual_pair_help"
+                    android:textColor="@color/text_dim"
+                    android:textSize="13sp" />
+
+                <EditText
+                    android:id="@+id/wizardPairCode"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:hint="@string/privilege_pairing_hint"
+                    android:imeOptions="flagNoExtractUi"
+                    android:importantForAutofill="no"
+                    android:inputType="number"
+                    android:maxLength="6"
+                    android:textColor="@color/text" />
+
+                <EditText
+                    android:id="@+id/wizardPairEndpoint"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:hint="@string/privilege_pair_endpoint_hint"
+                    android:imeOptions="flagNoExtractUi"
+                    android:importantForAutofill="no"
+                    android:inputType="text"
+                    android:textColor="@color/text" />
+
+                <Button
+                    android:id="@+id/wizardPairNow"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="@string/privilege_pair_now" />
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="12dp"
+                    android:text="@string/privilege_manual_connect_help"
+                    android:textColor="@color/text_dim"
+                    android:textSize="13sp" />
+
+                <EditText
+                    android:id="@+id/wizardConnectEndpoint"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:hint="@string/privilege_connect_endpoint_hint"
+                    android:imeOptions="flagNoExtractUi"
+                    android:importantForAutofill="no"
+                    android:inputType="text"
+                    android:textColor="@color/text" />
+
+                <Button
+                    android:id="@+id/wizardConnectNow"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="@string/privilege_connect_now" />
+            </LinearLayout>
+
+            <Button
+                android:id="@+id/wizardDiagnostics"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:text="@string/privilege_open_diagnostics" />
+
         </LinearLayout>
+        </ScrollView>
     </LinearLayout>
 
     <!-- Waiting scene — paired, no glasses yet. -->
