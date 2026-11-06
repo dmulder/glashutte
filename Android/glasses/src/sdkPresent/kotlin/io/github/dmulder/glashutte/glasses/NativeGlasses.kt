@@ -67,6 +67,19 @@ object NativeGlasses {
      */
     external fun getPose(): FloatArray
 
+    /**
+     * Copies the newest cached pose (same 7 floats as [getPose]) into [out] without consuming
+     * [isPoseFresh] and without allocating. Returns the sample's capture time in nanoseconds on
+     * the `System.nanoTime()` clock, or 0 when no pose has arrived yet.
+     */
+    external fun getPoseTimed(out: FloatArray): Long
+
+    /** Seconds of look-ahead passed to the Carina SDK pose call (`predict_time`); 0 = none. */
+    external fun setPredictTimeSeconds(seconds: Double)
+
+    /** Period of the native pose poll thread, in microseconds (clamped 1000..20000). */
+    external fun setPollIntervalMicros(micros: Int)
+
     /** True once, when a pose has arrived since the previous call. */
     external fun isPoseFresh(): Boolean
 

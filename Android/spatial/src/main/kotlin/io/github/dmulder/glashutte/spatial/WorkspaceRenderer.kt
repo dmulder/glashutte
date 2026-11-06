@@ -110,6 +110,15 @@ class WorkspaceRenderer(
     /** The view mode currently in effect, for diagnostics. */
     val currentViewModeForDiagnostics: ViewMode get() = viewMode
 
+    /**
+     * Optional per-frame pose source. When set and it reports a pose, [onDrawFrame] reads the
+     * head pose from it on the GL thread instead of relying on [setHeadPose] pushes — one
+     * coherent, timestamped sample per frame rather than four independently written floats.
+     */
+    @Volatile var headPoseSource: io.github.dmulder.glashutte.glasses.HeadPoseSource? = null
+    private val pulledPose = io.github.dmulder.glashutte.glasses.PulledPose()
+    private var lastPulledSequence = -1L
+
     @Volatile private var headW = 1f
     @Volatile private var headX = 0f
     @Volatile private var headY = 0f
@@ -1082,7 +1091,28 @@ class WorkspaceRenderer(
         desktopHalfWidth = desktopHalfHeight * surfaceAspect
     }
 
+    /** GL thread: latch this frame's head pose from [headPoseSource], if it provides one. */
+    private fun pullHeadPose() {
+        val source = headPoseSource ?: return
+        val p = pulledPose
+        if (!source.pull(System.nanoTime(), p)) return
+        if (p.sequence != lastPulledSequence) {
+            lastPulledSequence = p.sequence
+            headPoseUpdates++
+        }
+        headW = p.w
+        headX = p.x
+        headY = p.y
+        headZ = p.z
+        if (p.hasPosition) {
+            headPosX = p.px
+            headPosY = p.py
+            headPosZ = p.pz
+        }
+    }
+
     override fun onDrawFrame(gl: GL10?) {
+        pullHeadPose()
         if (bandDirty ||
             appliedCalibrated != ProjectionExperiments.calibratedProjection(appContext) ||
             appliedPanelPid != PanelSpecs.activeUsbPid

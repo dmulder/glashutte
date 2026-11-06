@@ -7,9 +7,13 @@ import android.os.Handler
 import android.os.Looper
 import android.view.Display
 import android.view.WindowManager
+import io.github.dmulder.glashutte.glasses.DisplayRefresh
 import io.github.dmulder.glashutte.glasses.GlassesDiagnostics
 import io.github.dmulder.glashutte.glasses.GlassesUsb
+import io.github.dmulder.glashutte.glasses.HeadPoseSource
 import io.github.dmulder.glashutte.glasses.HeadTracking
+import io.github.dmulder.glashutte.glasses.LatencyExperiments
+import io.github.dmulder.glashutte.glasses.LatencyTelemetry
 import io.github.dmulder.glashutte.glasses.TrackingExperiments
 
 /**
@@ -44,8 +48,32 @@ class WorkspacePresentation(
                 } else {
                     GlassesDiagnostics.warningBanner()
                 }
+            applyLatencyDisplaySettings()
             diagHandler.postDelayed(this, DIAG_INTERVAL_MS)
         }
+    }
+
+    private var appliedHighestRefresh: Boolean? = null
+    private var refreshRequest = "not requested"
+
+    /**
+     * Keep the window's preferred display mode in line with the "highest refresh rate"
+     * experiment, publish the display's live mode to the latency log, and emit its heartbeat.
+     */
+    private fun applyLatencyDisplaySettings() {
+        val settings = LatencyExperiments.current()
+        if (settings.highestRefresh != appliedHighestRefresh) {
+            appliedHighestRefresh = settings.highestRefresh
+            val result = DisplayRefresh.apply(window, display, settings.highestRefresh)
+            refreshRequest = result.description
+            GlassesDiagnostics.i(
+                GlassesDiagnostics.TAG,
+                "refresh rate: highestRefresh=${settings.highestRefresh} ${result.description}",
+            )
+        }
+        LatencyTelemetry.displayInfo = DisplayRefresh.describeActive(display) +
+            " [highestRefresh ${refreshRequest.substringBefore(" supported=")}]"
+        LatencyTelemetry.heartbeat(System.currentTimeMillis(), System.nanoTime(), settings)
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -77,6 +105,7 @@ class WorkspacePresentation(
             tracking.onCameraPermissionNeeded = { WorkspaceController.requestCameraPermission?.invoke() }
             tracking.start()
         }
+        renderer.headPoseSource = HeadPoseSource { now, out -> headTracking?.pullPose(now, out) ?: false }
         // Ctrl+Alt+R: ask the glasses/SDK to re-anchor its frame (no-op on backends that can't).
         WorkspaceController.sdkRecenter = { headTracking?.recenterDevice() }
         // The DOF-retry button's hook (WorkspaceController.retryHeadTracking) is owned by
@@ -118,6 +147,7 @@ class WorkspacePresentation(
 
     override fun dismiss() {
         diagHandler.removeCallbacks(diagTick)
+        surfaceView?.workspaceRenderer?.headPoseSource = null
         WorkspaceController.statusBanner = null
         headTracking?.stop()
         headTracking = null

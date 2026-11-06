@@ -46,6 +46,21 @@ interface GlassesSession : AutoCloseable {
     fun pollPose(): PoseSample?
 
     /**
+     * The newest head pose regardless of whether it was already seen, stamped with its capture
+     * time ([PoseSample.timestampNanos]). Unlike [pollPose] it consumes nothing, so it can be
+     * called once per rendered frame from the GL thread. `null` when the backend has no pose
+     * yet (or cannot supply one).
+     */
+    fun latestPose(): PoseSample? = null
+
+    /**
+     * Latency experiment hooks: [predictSeconds] is the look-ahead handed to the SDK's own pose
+     * prediction (0 = none) and [pollIntervalMicros] the period of the backend's pose poll.
+     * Backends without either knob ignore this. Safe to call at any time.
+     */
+    fun applyLatency(predictSeconds: Double, pollIntervalMicros: Int) {}
+
+    /**
      * Ask the *device/SDK* to re-anchor its coordinate frame on where the user is looking now
      * (native on-glasses recentre, or Carina origin reset). Returns whether the request was
      * accepted. This is separate from the app-side heading recentre in [PoseRecenterer],
@@ -128,6 +143,8 @@ class PoseSample(
     val px: Float = 0f,
     val py: Float = 0f,
     val pz: Float = 0f,
+    /** When the backend captured this sample, on the `System.nanoTime()` clock; 0 = unknown. */
+    val timestampNanos: Long = 0L,
 )
 
 data class GlassesDeviceState(
