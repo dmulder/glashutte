@@ -1,0 +1,35 @@
+# Apps that always open "flat" on the glasses' own display (native handoff) instead of in the
+# head-tracked workspace, because they play Widevine-protected video that a non-secure
+# virtual display blanks (audio, no picture).
+#
+# Format, one app per line:   package|Label|mode
+#   mode is optional: "flat" (glasses display + phone trackpad) or "mirror" (phone screen
+#   mirrored). Omit it to use the default mode chosen in Diagnostics.
+# This file is only the shipped starting point. Additions, removals and mode changes made in
+# the launcher or Diagnostics are stored separately and win over it.
+#
+# Package names were checked against Google Play listings / APK mirrors (Nov 2026) or, where
+# marked "corroborated", against open-source projects that hard-code the same id. Apps that are
+# not installed are simply never matched.
+
+# Verified on the Google Play listing
+com.netflix.mediaclient|Netflix
+com.amazon.avod.thirdpartyclient|Prime Video
+com.disney.disneyplus|Disney+
+com.hulu.plus|Hulu
+com.peacocktv.peacockandroid|Peacock
+com.apple.atve.androidtv.appletv|Apple TV
+com.vidangel|VidAngel
+
+# Corroborated by several open-source projects and package lists
+com.wbd.stream|Max
+com.hbo.hbonow|HBO Max (older package)
+com.cbs.app|Paramount+
+com.crunchyroll.crunchyroid|Crunchyroll
+com.google.android.apps.youtube.unplugged|YouTube TV
+com.google.android.videos|Google TV (Play Movies)
+
+# YouTube Premium is the regular YouTube app; most of its videos are not protected, but
+# rentals, purchases and live TV are. Remove it from the list if you would rather keep it in
+# the workspace.
+com.google.android.youtube|YouTube / YouTube Premium

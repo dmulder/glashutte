@@ -8,6 +8,9 @@
     -->
     <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
 
+    <!-- Only the Diagnostics Widevine playback test streams anything (public test vector). -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
     <!--
       The wireless-debugging "Pair device with a pairing code" dialog stops advertising its
       mDNS service the moment it backgrounds. To pair without leaving the dialog, Glashutte
@@ -97,6 +100,18 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!--
+          Widevine playback test (public test vector), opened from Diagnostics on the phone or
+          on the glasses' own display. Exported so the shell helper can start it on a display
+          the same way the native handoff starts a real app; it has no launcher icon.
+        -->
+        <activity
+            android:name=".DrmTestActivity"
+            android:exported="true"
+            android:label="Glashutte DRM test"
+            android:resizeableActivity="true"
+            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboardHidden|density|uiMode" />
 
         <provider
             android:name="androidx.core.content.FileProvider"

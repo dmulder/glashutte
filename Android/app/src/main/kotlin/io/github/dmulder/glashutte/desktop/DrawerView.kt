@@ -24,6 +24,9 @@ import android.widget.TextView
 import io.github.dmulder.glashutte.R
 import io.github.dmulder.glashutte.apps.AppCache
 import io.github.dmulder.glashutte.apps.InstalledApp
+import io.github.dmulder.glashutte.glasses.FlatAppStore
+import io.github.dmulder.glashutte.glasses.FlatMode
+import io.github.dmulder.glashutte.handoff.NativeHandoff
 import io.github.dmulder.glashutte.spatial.WorkspaceController
 
 /**
@@ -45,6 +48,13 @@ class DrawerView(context: Context) : LinearLayout(context) {
     private val grid: GridView
     private val allAppsTab: TextView
     private val recentTab: TextView
+    private val flatStrip: LinearLayout
+    private val flatStripTitle: TextView
+    private val flatToggle: TextView
+    private val flatModeButton: TextView
+    private val flatOpenNow: TextView
+    private var flatTarget: InstalledApp? = null
+    private val flatListener: () -> Unit = { mainHandler.post { adapter.notifyDataSetChanged(); renderFlatStrip() } }
 
     private val searchQueryListener: (String) -> Unit = { q ->
         mainHandler.post { setSearchText(q) }
@@ -86,6 +96,30 @@ class DrawerView(context: Context) : LinearLayout(context) {
             setOnItemClickListener { _, _, position, _ ->
                 (this@DrawerView.adapter.getItem(position) as? InstalledApp)?.let(::launch)
             }
+            setOnItemLongClickListener { _, _, position, _ ->
+                (this@DrawerView.adapter.getItem(position) as? InstalledApp)?.let {
+                    flatTarget = it
+                    renderFlatStrip()
+                }
+                true
+            }
+        }
+
+        flatStripTitle = flatChip(bold = true)
+        flatToggle = flatChip { toggleFlat() }
+        flatModeButton = flatChip { cycleFlatMode() }
+        flatOpenNow = flatChip { openFlatNow() }
+        flatStrip = LinearLayout(context).apply {
+            orientation = HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            visibility = GONE
+            setBackgroundColor(SEARCH_COLOR)
+            setPadding(dp(14), dp(8), dp(14), dp(8))
+            addView(flatStripTitle, LayoutParams(0, WRAP, 1f))
+            addView(flatToggle)
+            addView(flatModeButton)
+            addView(flatOpenNow)
+            addView(flatChip { flatTarget = null; renderFlatStrip() }.apply { text = "✕" })
         }
 
         search = EditText(context).apply {
@@ -112,6 +146,7 @@ class DrawerView(context: Context) : LinearLayout(context) {
 
         addView(tabs, LayoutParams(MATCH, WRAP).apply { bottomMargin = dp(12) })
         addView(grid, LayoutParams(MATCH, 0, 1f))
+        addView(flatStrip, LayoutParams(MATCH, WRAP).apply { topMargin = dp(8) })
         addView(search, LayoutParams(MATCH, WRAP).apply { topMargin = dp(14) })
 
         applyMode(WorkspaceController.drawerMode)
@@ -122,6 +157,7 @@ class DrawerView(context: Context) : LinearLayout(context) {
         super.onAttachedToWindow()
         WorkspaceController.onDrawerSearchQuery = searchQueryListener
         WorkspaceController.addDrawerModeListener(modeChangedListener)
+        FlatAppStore.addChangeListener(flatListener)
         registerDragLookup()
     }
 
@@ -130,6 +166,7 @@ class DrawerView(context: Context) : LinearLayout(context) {
             WorkspaceController.onDrawerSearchQuery = null
         }
         WorkspaceController.removeDrawerModeListener(modeChangedListener)
+        FlatAppStore.removeChangeListener(flatListener)
         unregisterDragLookup()
         super.onDetachedFromWindow()
     }
@@ -243,6 +280,56 @@ class DrawerView(context: Context) : LinearLayout(context) {
         setOnClickListener { onClick() }
     }
 
+    private fun flatChip(bold: Boolean = false, onClick: (() -> Unit)? = null): TextView = TextView(context).apply {
+        textSize = 13f
+        setTextColor(TAB_ACTIVE)
+        if (bold) typeface = Typeface.DEFAULT_BOLD
+        if (onClick != null) {
+            setPadding(dp(12), dp(6), dp(12), dp(6))
+            background = GradientDrawable().apply { cornerRadius = dp(14).toFloat(); setColor(0xFFD3D5DB.toInt()) }
+            setOnClickListener { onClick() }
+            layoutParams = LayoutParams(WRAP, WRAP).apply { marginStart = dp(8) }
+        }
+    }
+
+    /** The long-press strip: edit this app's place on the always-flat list, or open it flat once. */
+    private fun renderFlatStrip() {
+        val app = flatTarget
+        if (app == null) {
+            flatStrip.visibility = GONE
+            return
+        }
+        val listed = FlatAppStore.contains(app.packageName)
+        flatStrip.visibility = VISIBLE
+        flatStripTitle.text = if (listed) "${app.label}: always opens flat" else "${app.label}: opens in the workspace"
+        flatToggle.text = if (listed) "Remove from flat list" else "Always open flat"
+        flatModeButton.visibility = if (listed) VISIBLE else GONE
+        flatModeButton.text = "Mode: " + if (FlatAppStore.modeFor(app.packageName) == FlatMode.MIRROR) "phone mirror" else "flat + trackpad"
+        flatOpenNow.text = "Open flat now"
+    }
+
+    private fun toggleFlat() {
+        val app = flatTarget ?: return
+        if (FlatAppStore.contains(app.packageName)) FlatAppStore.remove(app.packageName)
+        else FlatAppStore.add(app.packageName, app.label)
+        renderFlatStrip()
+    }
+
+    private fun cycleFlatMode() {
+        val app = flatTarget ?: return
+        val next = if (FlatAppStore.modeFor(app.packageName) == FlatMode.MIRROR) FlatMode.FLAT_TRACKPAD else FlatMode.MIRROR
+        FlatAppStore.setMode(app.packageName, next)
+        renderFlatStrip()
+    }
+
+    private fun openFlatNow() {
+        val app = flatTarget ?: return
+        flatTarget = null
+        renderFlatStrip()
+        NativeHandoff.launch(app.packageName, app.activityName, app.label, "drawer: Open flat now")
+        WorkspaceController.setDrawerOpen(false)
+    }
+
     private fun launch(app: InstalledApp) {
         android.util.Log.i(
             "Glashutte/Launch",
@@ -314,7 +401,8 @@ class DrawerView(context: Context) : LinearLayout(context) {
             val cell = convertView as? LinearLayout ?: newCell()
             val app = items[position]
             (cell.getChildAt(0) as ImageView).setImageDrawable(app.icon)
-            (cell.getChildAt(1) as TextView).text = app.label
+            (cell.getChildAt(1) as TextView).text =
+                if (FlatAppStore.contains(app.packageName)) "▣ ${app.label}" else app.label
             return cell
         }
 

@@ -3,6 +3,12 @@
     <string name="workspace_title">Glashutte Workspace</string>
     <string name="apps_header">Installed apps</string>
     <string name="capture_button">Capture workspace</string>
+    <string name="flat_back">Back</string>
+    <string name="flat_home">Home</string>
+    <string name="flat_play_pause">Play / Pause</string>
+    <string name="flat_vol_down">Vol −</string>
+    <string name="flat_vol_up">Vol +</string>
+    <string name="flat_return">Return to workspace</string>
     <string name="keyboard_hint">Type — keys go to the focused app</string>
 
     <!-- Wizard scene — privileged-helper setup over Wireless Debugging.

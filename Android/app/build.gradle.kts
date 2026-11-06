@@ -65,4 +65,8 @@ dependencies {
     implementation(libs.libadb.android)
     implementation(libs.conscrypt.android)
     implementation(libs.sun.security.android)
+
+    // DRM playback test only (public Widevine test vector); see DrmTestActivity.
+    implementation(libs.androidx.media3.exoplayer)
+    implementation(libs.androidx.media3.exoplayer.dash)
 }

@@ -14,6 +14,7 @@ package io.github.dmulder.glashutte.privileged
  *  - Ctrl+Alt+X         → [HK_TOGGLE_VIEW_MODE]   → `WorkspaceController.setViewMode(opposite)`
  *  - Ctrl+Alt+R         → [HK_SDK_RECENTER]       → `GlassesSession.recenter()` (Carina origin reset)
  *  - Ctrl+Alt+C         → [HK_ANCHOR_POSE]        → `WorkspaceController.alignVerticalToHead()`
+ *  - Ctrl+Alt+H         → [HK_RETURN_TO_WORKSPACE] → `NativeHandoff.returnToWorkspace()`
  *
  * Ctrl+Alt+Wheel is handled in `MainActivity.dispatchGenericMotionEvent` directly — the
  * keyboard modifier state rides on the MotionEvent, so the activity sees it without needing
@@ -43,4 +44,7 @@ object PrivilegedHotkeys {
     /** Cycle FREE-mode layout (SINGLE → VHV → … ). No-op in PINNED. Android-only —
      *  the Windows companion has no equivalent "scene layout" concept. */
     const val HK_CYCLE_LAYOUT = 9
+
+    /** Ctrl+Alt+H: leave a flat (native handoff) app and return to the workspace. */
+    const val HK_RETURN_TO_WORKSPACE = 10
 }
