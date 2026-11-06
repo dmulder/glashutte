@@ -231,6 +231,23 @@ class MainActivity : ComponentActivity() {
         ActivityResultContracts.RequestPermission(),
     ) { /* ignored — launched apps will see the system prompt themselves if denied */ }
 
+    /**
+     * Result-launcher for CAMERA. Android withholds USB access to a device that exposes a
+     * video-class interface (the glasses' Carina VIO cameras) until the app holds CAMERA, so
+     * head tracking is restarted once the user answers.
+     */
+    private val requestCameraPermission = registerForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        Log.i("Glashutte/Main", "CAMERA permission result granted=$granted")
+        io.github.dmulder.glashutte.glasses.GlassesDiagnostics.i(
+            "Glashutte/Main", "CAMERA permission result granted=$granted",
+        )
+        presentation?.restartHeadTracking()
+    }
+
+    private var cameraPermissionAsked = false
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         // DO NOT add FLAG_NOT_FOCUSABLE here, and do NOT make this window hold input
@@ -293,6 +310,7 @@ class MainActivity : ComponentActivity() {
         // The in-view toolbar's DOF-retry button routes here too, so both report success /
         // failure the same way. (WorkspacePresentation no longer owns this hook.)
         WorkspaceController.retryHeadTracking = { mainHandler.post { attemptReconnectDof() } }
+        WorkspaceController.requestCameraPermission = { mainHandler.post { askCameraPermissionOnce() } }
         // Tap = one-shot screenshot; long-press = start/stop frame-sequence recording.
         binding.captureButton.setOnClickListener { onSnapshot() }
         binding.captureButton.setOnLongClickListener {
@@ -455,6 +473,15 @@ class MainActivity : ComponentActivity() {
         if (ContextCompat.checkSelfPermission(this, perm) != PackageManager.PERMISSION_GRANTED) {
             requestNotificationPermission.launch(perm)
         }
+    }
+
+    private fun askCameraPermissionOnce() {
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) ==
+            PackageManager.PERMISSION_GRANTED
+        ) return
+        if (cameraPermissionAsked) return
+        cameraPermissionAsked = true
+        requestCameraPermission.launch(Manifest.permission.CAMERA)
     }
 
     private fun requestMicrophonePermissionIfNeeded() {

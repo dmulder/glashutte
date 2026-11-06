@@ -97,6 +97,13 @@ class WorkspaceRenderer(
 
 
     // Head-orientation quaternion (w, x, y, z); identity means looking straight ahead.
+    /** How many head poses [setHeadPose] has received (diagnostics only). */
+    @Volatile var headPoseUpdates = 0L
+        private set
+
+    /** The view mode currently in effect, for diagnostics. */
+    val currentViewModeForDiagnostics: ViewMode get() = viewMode
+
     @Volatile private var headW = 1f
     @Volatile private var headX = 0f
     @Volatile private var headY = 0f
@@ -378,6 +385,7 @@ class WorkspaceRenderer(
 
     /** Feed a head-orientation quaternion for the camera. Safe to call from any thread. */
     fun setHeadPose(w: Float, x: Float, y: Float, z: Float) {
+        headPoseUpdates++
         headW = w
         headX = x
         headY = y
@@ -863,6 +871,11 @@ class WorkspaceRenderer(
             layoutAnnouncementTextureId = 0
             layoutAnnouncementCachedText = null
         }
+        if (bannerTextureId != 0) {
+            GLES20.glDeleteTextures(1, intArrayOf(bannerTextureId), 0)
+            bannerTextureId = 0
+            bannerCachedText = null
+        }
         // Capture PBO belongs to the now-gone context — zero it so ensureCapturePbo
         // recreates on the next capture (the id from the old context is invalid here).
         capturePboId = 0
@@ -1155,6 +1168,7 @@ class WorkspaceRenderer(
         drawRecordingIndicator()
         if (WorkspaceController.legendVisible) drawLegend()
         drawLayoutAnnouncement()
+        drawStatusBanner()
         drawCursor()
 
         // Capture pipeline: first consume any async readback issued on an earlier frame
@@ -3328,6 +3342,95 @@ class WorkspaceRenderer(
         layoutAnnouncementTextureH = h
     }
 
+    // Persistent status banner (head-tracking warnings, optional diagnostics overlay) ----
+    private var bannerCachedText: String? = null
+    private var bannerTextureId = 0
+    private var bannerTextureW = 0
+    private var bannerTextureH = 0
+
+    /**
+     * Draws [WorkspaceController.statusBanner] at the top of the view for as long as it is
+     * set. Used so a missing head tracker (or the stub build) is visible *in the glasses*,
+     * not only in a log nobody is reading.
+     */
+    private fun drawStatusBanner() {
+        val text = WorkspaceController.statusBanner
+        if (text.isNullOrEmpty()) return
+        if (text != bannerCachedText) {
+            buildBannerTexture(text)
+            bannerCachedText = text
+        }
+        if (bannerTextureId == 0) return
+
+        val lines = text.count { it == '\n' } + 1
+        var halfH = BANNER_LINE_HALF_H * lines + 0.02f
+        var halfW = halfH * (bannerTextureW.toFloat() / bannerTextureH) / surfaceAspect
+        if (halfW > BANNER_MAX_HALF_W) {
+            val k = BANNER_MAX_HALF_W / halfW
+            halfW *= k
+            halfH *= k
+        }
+        GLES20.glDisable(GLES20.GL_DEPTH_TEST)
+        GLES20.glEnable(GLES20.GL_BLEND)
+        GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA)
+        GLES20.glUseProgram(hudProgram)
+        hudQuad.position(0)
+        GLES20.glVertexAttribPointer(hudAPosition, 2, GLES20.GL_FLOAT, false, HUD_STRIDE_BYTES, hudQuad)
+        hudQuad.position(2)
+        GLES20.glVertexAttribPointer(hudATexCoord, 2, GLES20.GL_FLOAT, false, HUD_STRIDE_BYTES, hudQuad)
+        GLES20.glEnableVertexAttribArray(hudAPosition)
+        GLES20.glEnableVertexAttribArray(hudATexCoord)
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, bannerTextureId)
+        GLES20.glUniform1i(hudUTexture, 0)
+        GLES20.glUniform2f(hudUCenter, 0f, BANNER_TOP_Y - halfH)
+        GLES20.glUniform2f(hudUHalfSize, halfW, halfH)
+        GLES20.glUniform4f(hudUColor, 1f, 1f, 1f, 1f)
+        GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, QUAD_VERTEX_COUNT)
+        GLES20.glDisableVertexAttribArray(hudAPosition)
+        GLES20.glDisableVertexAttribArray(hudATexCoord)
+        GLES20.glDisable(GLES20.GL_BLEND)
+    }
+
+    private fun buildBannerTexture(text: String) {
+        if (bannerTextureId != 0) {
+            GLES20.glDeleteTextures(1, intArrayOf(bannerTextureId), 0)
+            bannerTextureId = 0
+        }
+        val warning = text.startsWith("NO HEAD TRACKING") || text.startsWith("HEAD TRACKING OFF")
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = if (warning) Color.rgb(255, 190, 60) else Color.WHITE
+            textSize = 40f
+            typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
+        }
+        val lines = text.split('\n')
+        val padX = 36f
+        val padY = 20f
+        val fm = paint.fontMetrics
+        val lineH = fm.descent - fm.ascent
+        val textW = lines.maxOf { paint.measureText(it) }
+        val w = (textW + padX * 2).toInt().coerceAtLeast(1)
+        val h = (lineH * lines.size + padY * 2).toInt().coerceAtLeast(1)
+        val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(bmp)
+        canvas.drawColor(Color.argb(215, 0, 0, 0))
+        lines.forEachIndexed { i, line ->
+            canvas.drawText(line, padX, padY - fm.ascent + i * lineH, paint)
+        }
+        val ids = IntArray(1)
+        GLES20.glGenTextures(1, ids, 0)
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, ids[0])
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
+        GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, bmp, 0)
+        bmp.recycle()
+        bannerTextureId = ids[0]
+        bannerTextureW = w
+        bannerTextureH = h
+    }
+
     /** Toolbar button whose NDC rect contains the cursor, or null. Disabled buttons are
      *  skipped so a click on a grayed icon behaves like a click on background. */
     private fun toolbarButtonAtCursor(): HudButton? {
@@ -3808,6 +3911,10 @@ class WorkspaceRenderer(
         const val LAYOUT_ANNOUNCE_CX = 0f
         const val LAYOUT_ANNOUNCE_CY = -0.75f
         const val LAYOUT_ANNOUNCE_HALF_H = 0.06f
+        // Status banner — persistent warning / diagnostics text anchored to the top edge.
+        const val BANNER_TOP_Y = 0.92f
+        const val BANNER_LINE_HALF_H = 0.034f
+        const val BANNER_MAX_HALF_W = 0.96f
 
         val LEGEND_ROWS: List<Pair<String, String>> = listOf(
             "Wheel" to "Zoom",

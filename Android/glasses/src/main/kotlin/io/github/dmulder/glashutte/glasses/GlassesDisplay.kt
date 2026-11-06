@@ -48,7 +48,11 @@ object GlassesDisplay {
             .firstOrNull {
                 !it.name.startsWith(GLASHUTTE_SCREEN_PREFIX) && it.state != Display.STATE_OFF
             }
-        Log.i(TAG, "glasses display: ${glasses?.let { "id=${it.displayId} '${it.name}'" } ?: "none"}")
+        val summary = glasses?.let {
+            "id=${it.displayId} '${it.name}' ${it.mode.physicalWidth}x${it.mode.physicalHeight}@${"%.0f".format(it.refreshRate)}Hz"
+        } ?: "none"
+        Log.i(TAG, "glasses display: $summary")
+        GlassesDiagnostics.displayInfo = summary
         return glasses
     }
 }

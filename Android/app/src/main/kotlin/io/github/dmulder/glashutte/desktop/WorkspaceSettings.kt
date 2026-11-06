@@ -26,6 +26,7 @@ object WorkspaceSettings {
     private const val KEY_PINCH_ENABLED = "pinch_enabled"
     private const val KEY_AUTO_RECENTER_ON_UNLOCK = "auto_recenter_on_unlock"
     private const val KEY_CARINA_6DOF = "carina_6dof"
+    private const val KEY_AUTO_WORLD_LOCK = "auto_world_lock"
 
     /** Default multiplier on per-frame cursor delta; 1.0 = no scaling. */
     const val DEFAULT_CURSOR_SENSITIVITY = 1.0f
@@ -174,6 +175,16 @@ object WorkspaceSettings {
         if (::prefs.isInitialized) prefs.getBoolean(KEY_AUTO_RECENTER_ON_UNLOCK, true) else true
 
     fun setAutoRecenterOnUnlock(value: Boolean) = putBoolean(KEY_AUTO_RECENTER_ON_UNLOCK, value)
+
+    /**
+     * World-lock (FREE view) automatically as soon as head tracking comes up. Without this the
+     * workspace stays PINNED to the head until the lock button is tapped, which looks like
+     * "no head tracking".
+     */
+    fun autoWorldLock(): Boolean =
+        if (::prefs.isInitialized) prefs.getBoolean(KEY_AUTO_WORLD_LOCK, true) else true
+
+    fun setAutoWorldLock(value: Boolean) = putBoolean(KEY_AUTO_WORLD_LOCK, value)
 
     /**
      * Carina 6DOF head tracking (positional parallax) vs 3DOF (orientation only). Default

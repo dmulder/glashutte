@@ -119,7 +119,10 @@ message rather than half-building.
 
 Guards against accidental commits: `.gitignore` entries (`*.so`, `/Android/libs/viture-sdk/`,
 `/Viture/`, jniLibs and include paths) and a CI step that fails if any SDK-looking file is
-tracked. CI never has the SDK, so CI artifacts are stub-backend builds.
+tracked. CI never has the SDK, so CI artifacts are stub-backend builds. Because a stub can never
+track, the container build fails by default when the SDK is missing (`-Pviture.sdk=required`,
+`make build/apk VITURE=off` for a deliberate stub), and the entrypoint verifies the APK's `.so`
+files match the file name (`-with-viture-sdk` / `-no-viture-sdk`).
 
 ## 5. Failure modes
 
@@ -129,6 +132,30 @@ tracked. CI never has the SDK, so CI artifacts are stub-backend builds.
 - SDK present but the glasses reject the handshake: `NativeGlasses.create` fails, `open()`
   returns `null` and the same graceful path applies.
 - Pose stream dies or never starts: unchanged watchdogs, now above the backend.
+
+### 5.1 Diagnostics
+
+`GlassesDiagnostics` (in `:glasses`) records the eight pipeline stages (backend, USB device, USB
+permission, SDK create, SDK initialize/start, tracking path, pose stream, renderer), SDK return
+codes, the tracking path the SDK picked, pose rate and last pose, native JNI counters, the USB
+inventory and the SDK's own log (via an optional `set_log_hook` resolved with `dlsym`, so SDKs
+without it still load). It feeds logcat tag `GlashutteDiag`, the *Glashutte Diagnostics*
+activity (live report, log export, experiments) and a banner on the glasses. Procedure:
+[`HEAD-TRACKING-DEBUG.md`](HEAD-TRACKING-DEBUG.md).
+
+Findings from tracing the path against upstream (code reading, not hardware):
+
+- The refactor did not change the SDK call order (`create` -> Carina DoF type -> state callback
+  -> `initialize` -> `start` -> path setup), the pose math, or the watchdogs.
+- Upstream also starts in `PINNED`, where the camera ignores head pose. Without a manual lock tap
+  the workspace looks untracked even when poses flow. The app now switches to `FREE`
+  automatically when tracking comes up (setting: world-lock automatically).
+- The `initialize`/`start` return codes were discarded and native poll failures were silent, so a
+  failed SDK handshake looked identical to "no pose". Both are now recorded.
+- No CAMERA permission was declared. Android withholds USB access to a device with a video-class
+  interface until the app holds CAMERA; the glasses' Carina cameras are exposed that way
+  (hypothesis for the Luma Ultra on a Pixel, confirmed by the report's USB inventory and
+  permission lines).
 
 ## 6. Build and CI
 
@@ -199,6 +226,7 @@ Only testable with the owner's Pixel 10 Pro XL, Android 17 and glasses:
       on Android 17) and launch a third-party app onto one.
 - [ ] `GlassesDisplay.find` selects the glasses' display; the `Presentation` appears; the
       phone keeps its own screen.
+- [ ] Run the procedure in [`HEAD-TRACKING-DEBUG.md`](HEAD-TRACKING-DEBUG.md); every stage OK.
 - [ ] USB permission flow and product id (`0x1101`/`0x1104` for Luma Ultra) accepted by
       `GlassesUsb`.
 - [ ] Which tracking path the SDK picks (`isProductSupportNativeDof` for the Luma Ultra

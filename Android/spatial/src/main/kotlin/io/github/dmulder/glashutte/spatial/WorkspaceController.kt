@@ -120,6 +120,14 @@ object WorkspaceController {
     @Volatile
     var retryHeadTracking: (() -> Unit)? = null
 
+    /**
+     * Ask the user for the CAMERA permission. Android withholds the glasses' USB device
+     * (which exposes a video interface) until it is granted. Wired by MainActivity, which
+     * restarts head tracking once the user answers.
+     */
+    @Volatile
+    var requestCameraPermission: (() -> Unit)? = null
+
     /** Forward a pinch scale factor (1.0 = identity) into the workspace zoom. */
     fun pinch(scaleFactor: Float) {
         renderer?.requestPinch(scaleFactor)
@@ -172,7 +180,17 @@ object WorkspaceController {
                     "Glashutte/DOF",
                     "auto-reverting to PINNED — DOF lost while FREE",
                 )
-                setViewMode(WorkspaceRenderer.ViewMode.PINNED)
+                setViewMode(WorkspaceRenderer.ViewMode.PINNED, auto = true)
+            }
+            // The workspace starts PINNED (it follows the head), which looks exactly like "no
+            // tracking". As soon as a pose stream is live, world-lock it unless the user
+            // deliberately pinned it.
+            if (value && autoWorldLock && !userPinned && viewMode == WorkspaceRenderer.ViewMode.PINNED) {
+                android.util.Log.i(
+                    "Glashutte/DOF",
+                    "tracking live — auto world-lock (PINNED -> FREE)",
+                )
+                setViewMode(WorkspaceRenderer.ViewMode.FREE, auto = true)
             }
             dofListeners.forEach { runCatching { it(value) } }
         }
@@ -888,7 +906,8 @@ object WorkspaceController {
      * Closes the drawer if it was open — switching modes makes the previous drawer's
      * anchor screen meaningless.
      */
-    fun setViewMode(mode: WorkspaceRenderer.ViewMode) {
+    fun setViewMode(mode: WorkspaceRenderer.ViewMode, auto: Boolean = false) {
+        if (!auto) userPinned = mode == WorkspaceRenderer.ViewMode.PINNED
         if (viewMode == mode) return
         viewMode = mode
         if (drawerOpenState) setDrawerOpen(false)
@@ -985,6 +1004,18 @@ object WorkspaceController {
     @Volatile var longPressMs: Long = 500L
     @Volatile var pinchEnabled: Boolean = true
     @Volatile var autoRecenterOnUnlock: Boolean = true
+
+    /** World-lock (FREE) automatically whenever head tracking comes up. */
+    @Volatile var autoWorldLock: Boolean = true
+
+    /** True once the user explicitly chose PINNED; suppresses [autoWorldLock] until they unlock. */
+    @Volatile var userPinned: Boolean = false
+
+    /**
+     * Persistent text drawn at the top of the glasses view (head-tracking warnings, or the
+     * diagnostics overlay). `null` or empty draws nothing.
+     */
+    @Volatile var statusBanner: String? = null
     /** Carina 6DOF (positional parallax) vs 3DOF (orientation only). Read by HeadTracking
      *  on each reconnect via [WorkspacePresentation]; applies on the next reconnect. */
     @Volatile var carina6Dof: Boolean = false

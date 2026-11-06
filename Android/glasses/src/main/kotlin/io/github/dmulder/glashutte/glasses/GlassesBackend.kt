@@ -62,6 +62,9 @@ interface GlassesSession : AutoCloseable {
     /** Latest cached brightness / volume / film state; fields are -1 when unknown. */
     fun readDeviceState(): GlassesDeviceState
 
+    /** Backend-specific counters for the diagnostics screen (`key` to `value`). Never throws. */
+    fun diagnostics(): Map<String, String> = emptyMap()
+
     /** Stop tracking and release every native/USB resource. Safe to call twice. */
     override fun close()
 }
@@ -105,6 +108,10 @@ data class GlassesDisplayMode(
 data class SessionOptions(
     /** Carina only: run VIO in 6DoF (positional parallax). Fixed for the life of a session. */
     val sixDof: Boolean = false,
+    /** Diagnostics experiment: force a tracking path instead of trusting the SDK. */
+    val pathOverride: TrackingExperiments.PathOverride = TrackingExperiments.PathOverride.AUTO,
+    /** Diagnostics experiment: writable directory handed to the SDK's initialize (default: NULL). */
+    val sdkCacheDir: String? = null,
 )
 
 /**

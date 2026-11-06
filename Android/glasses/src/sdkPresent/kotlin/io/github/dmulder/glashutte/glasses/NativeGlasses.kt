@@ -29,6 +29,9 @@ object NativeGlasses {
 
     external fun registerStateCallback(): Int
     external fun initialize(): Int
+
+    /** [initialize] with a writable calibration-cache directory instead of `NULL`. */
+    external fun initializeWithCacheDir(cacheDir: String?): Int
     external fun start(): Int
     external fun stop(): Int
     external fun shutdown(): Int
@@ -75,6 +78,22 @@ object NativeGlasses {
     external fun getBrightness(): Int
     external fun getVolume(): Int
     external fun getFilm(): Int
+
+    // Diagnostics (read-only probes; see glasses_bridge.cpp) ----------------
+
+    /** Raise libglasses' log level and mirror its log hook into logcat + an in-process buffer. */
+    external fun enableSdkLogging(level: Int): String
+    external fun getSdkLog(): String
+
+    /** What the SDK reports about a USB product id (valid? market name, native DOF, camera ids). */
+    external fun probeProduct(pid: Int): String
+
+    /** Carina: install counting callbacks (IMU, pose, stereo camera). After create, before initialize. */
+    external fun registerCarinaDiagCallbacks(withCamera: Boolean): Int
+
+    /** `key=value;key=value` counters from the native layer. */
+    external fun getNativeStats(): String
+    external fun resetNativeStats()
 
     const val DEVICE_TYPE_CARINA: Int = 2
 }

@@ -4,9 +4,13 @@
 #   make help            show targets
 #   make build/apk       debug + release APKs  ->  ./dist/
 #
-# The proprietary VITURE SDK is never baked into the image and never committed. If you have
-# it locally (Android/libs/viture-sdk, or VITURE_SDK_DIR=/path), it is mounted read-only into
-# the build container and the resulting APKs embed it. Without it the stub backend is built.
+# The proprietary VITURE SDK is never baked into the image and never committed. Put it in
+# Android/libs/viture-sdk (or pass VITURE_SDK_DIR=/path); it is mounted read-only into the
+# build container and the resulting APKs embed it (file name ends in -with-viture-sdk.apk).
+#
+# A build WITHOUT the SDK is a stub: it installs and shows the workspace but can NEVER do
+# head tracking. So `make build/apk` FAILS when the SDK is missing. Build the stub on purpose
+# with `make build/apk VITURE=off` (file name ends in -no-viture-sdk.apk).
 
 # Container engine: podman first, then docker; override with CONTAINER_ENGINE=...
 CONTAINER_ENGINE ?= $(shell command -v podman 2>/dev/null || command -v docker 2>/dev/null)
@@ -20,8 +24,9 @@ WORK_VOLUME    ?= glashutte-work
 OUTPUT_DIR     ?= dist
 # Local VITURE SDK (host path). Mounted only if it contains the headers.
 VITURE_SDK_DIR ?= $(CURDIR)/Android/libs/viture-sdk
-# VITURE=off forces the stub backend even when an SDK is present.
-VITURE         ?= auto
+# VITURE=required (default): fail unless the SDK is present. VITURE=off: build the head-tracking-less
+# stub on purpose, even if an SDK is present. (VITURE=auto is an alias of required.)
+VITURE         ?= required
 # Extra Gradle arguments (e.g. GRADLE_ARGS=--info) and extra container-run arguments.
 GRADLE_ARGS    ?=
 RUN_ARGS       ?=
@@ -30,7 +35,9 @@ MAVEN_CENTRAL_URL ?=
 
 OUT_ABS  := $(abspath $(OUTPUT_DIR))
 SDK_ABS  := $(abspath $(VITURE_SDK_DIR))
-HAVE_SDK := $(if $(wildcard $(SDK_ABS)/include/viture_glasses_provider.h),yes,no)
+SDK_HEADER := $(wildcard $(SDK_ABS)/include/viture_glasses_provider.h)
+SDK_LIB    := $(wildcard $(SDK_ABS)/libs/arm64-v8a/libglasses.so $(SDK_ABS)/android/arm64-v8a/libglasses.so)
+HAVE_SDK   := $(if $(and $(SDK_HEADER),$(SDK_LIB)),yes,no)
 
 ENGINE_VERSION := $(shell $(CONTAINER_ENGINE) --version 2>/dev/null)
 IS_PODMAN      := $(findstring podman,$(ENGINE_VERSION))
@@ -74,7 +81,7 @@ RUN = $(CONTAINER_ENGINE) run --rm $(TTY_FLAGS) --platform $(PLATFORM) $(USER_FL
 	$(RUN_ARGS) $(IMAGE)
 
 .DEFAULT_GOAL := help
-.PHONY: help info check-engine image build/apk build/apk-debug build/apk-release test shell gradle clean distclean
+.PHONY: help info check-engine check-sdk image build/apk build/apk-debug build/apk-release test shell gradle clean distclean
 
 help: ## Show this help
 	@printf "Glashutte container build\n\nUsage:\n  make <target>\n\nTargets:\n"
@@ -83,7 +90,7 @@ help: ## Show this help
 	@printf "  CONTAINER_ENGINE  podman, else docker (detected: %s)\n" "$(if $(CONTAINER_ENGINE),$(CONTAINER_ENGINE),none found)"
 	@printf "  OUTPUT_DIR        where APKs are written (default: dist)\n"
 	@printf "  VITURE_SDK_DIR    local VITURE SDK, mounted read-only (default: Android/libs/viture-sdk; found: %s)\n" "$(HAVE_SDK)"
-	@printf "  VITURE=off        force the stub backend even if an SDK is present\n"
+	@printf "  VITURE=off        build the head-tracking-less STUB on purpose (default: fail if the SDK is missing)\n"
 	@printf "  BASE_IMAGE        base image (default: docker.io/library/ubuntu:24.04)\n"
 	@printf "  GRADLE_ARGS, RUN_ARGS, IMAGE, PLATFORM, CACHE_VOLUME, WORK_VOLUME, MOUNT_LABEL\n"
 	@printf "  MAVEN_CENTRAL_URL optional Maven Central mirror or repository cache URL\n"
@@ -92,11 +99,25 @@ help: ## Show this help
 check-engine:
 	@command -v "$(CONTAINER_ENGINE)" > /dev/null 2>&1 || { echo "error: container engine '$(CONTAINER_ENGINE)' not found; install podman or docker, or set CONTAINER_ENGINE=" >&2; exit 1; }
 
+check-sdk:
+ifneq ($(VITURE),off)
+	@if [ "$(HAVE_SDK)" != "yes" ]; then \
+	  echo "" >&2; \
+	  echo "error: VITURE SDK not found in $(SDK_ABS)" >&2; \
+	  echo "  need include/viture_glasses_provider.h and libs/arm64-v8a/libglasses.so (or android/arm64-v8a/libglasses.so)." >&2; \
+	  echo "  A build without the SDK is a STUB with NO head tracking (3DoF/6DoF)." >&2; \
+	  echo "  - have the SDK:   put it in Android/libs/viture-sdk or run: make build/apk VITURE_SDK_DIR=/path/to/sdk" >&2; \
+	  echo "  - want the stub:  make build/apk VITURE=off" >&2; \
+	  echo "" >&2; \
+	  exit 1; \
+	fi
+endif
+
 info: check-engine ## Show detected engine, mounts and SDK status
 	@echo "engine:      $(CONTAINER_ENGINE) ($(ENGINE_VERSION))"
 	@echo "image:       $(IMAGE) (platform $(PLATFORM))"
 	@echo "user flags:  $(USER_FLAGS)"
-	@echo "VITURE SDK:  $(HAVE_SDK) ($(SDK_ABS)); VITURE=$(VITURE)"
+	@echo "VITURE SDK:  found=$(HAVE_SDK) ($(SDK_ABS)); VITURE=$(VITURE) -> $(if $(filter off,$(VITURE)),STUB build (no head tracking),$(if $(filter yes,$(HAVE_SDK)),with-viture-sdk build,build will FAIL: SDK missing))"
 	@echo "output:      $(OUT_ABS)"
 	@echo "volumes:     $(CACHE_VOLUME) (caches), $(WORK_VOLUME) (scratch build tree)"
 
@@ -107,13 +128,13 @@ image: check-engine ## Build the build-environment image (no SDK, no source insi
 $(OUT_ABS):
 	mkdir -p $@
 
-build/apk: image $(OUT_ABS) ## Build debug and release APKs into dist/
+build/apk: check-sdk image $(OUT_ABS) ## Build debug and release APKs into dist/
 	$(RUN) apk-all
 
-build/apk-debug: image $(OUT_ABS) ## Build only the debug APK
+build/apk-debug: check-sdk image $(OUT_ABS) ## Build only the debug APK
 	$(RUN) apk-debug
 
-build/apk-release: image $(OUT_ABS) ## Build only the (unsigned) release APK
+build/apk-release: check-sdk image $(OUT_ABS) ## Build only the (unsigned) release APK
 	$(RUN) apk-release
 
 test: image $(OUT_ABS) ## Run unit tests in the container

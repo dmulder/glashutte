@@ -601,6 +601,12 @@ class SettingsView(context: Context) : LinearLayout(context) {
         )
         addView(
             backedToggleRow(
+                label = "World-lock automatically when head tracking starts",
+                current = WorkspaceSettings.autoWorldLock(),
+            ) { WorkspaceSettings.setAutoWorldLock(it) },
+        )
+        addView(
+            backedToggleRow(
                 label = "6DOF head tracking — positional parallax (applies on reconnect)",
                 current = WorkspaceSettings.carina6Dof(),
             ) { WorkspaceSettings.setCarina6Dof(it) },

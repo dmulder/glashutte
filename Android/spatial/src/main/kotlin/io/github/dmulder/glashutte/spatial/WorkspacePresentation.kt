@@ -3,10 +3,14 @@ package io.github.dmulder.glashutte.spatial
 import android.app.Presentation
 import android.content.Context
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.view.Display
 import android.view.WindowManager
+import io.github.dmulder.glashutte.glasses.GlassesDiagnostics
 import io.github.dmulder.glashutte.glasses.GlassesUsb
 import io.github.dmulder.glashutte.glasses.HeadTracking
+import io.github.dmulder.glashutte.glasses.TrackingExperiments
 
 /**
  * Hosts the workspace on the VITURE glasses.
@@ -23,6 +27,27 @@ class WorkspacePresentation(
     private var surfaceView: WorkspaceSurfaceView? = null
     private var headTracking: HeadTracking? = null
 
+    private val diagHandler = Handler(Looper.getMainLooper())
+    private val diagTick = object : Runnable {
+        override fun run() {
+            val renderer = surfaceView?.workspaceRenderer
+            if (renderer != null) {
+                GlassesDiagnostics.setRenderer(
+                    renderer.currentViewModeForDiagnostics.name,
+                    WorkspaceController.headTrackingActive,
+                    renderer.headPoseUpdates,
+                )
+            }
+            WorkspaceController.statusBanner =
+                if (TrackingExperiments.glassesOverlay(context)) {
+                    GlassesDiagnostics.overlayText()
+                } else {
+                    GlassesDiagnostics.warningBanner()
+                }
+            diagHandler.postDelayed(this, DIAG_INTERVAL_MS)
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         window?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
@@ -38,6 +63,8 @@ class WorkspacePresentation(
         // headTrackingActive flag on start/stop transitions, which (a) ungrays the FREE
         // toggle in the toolbars and (b) auto-reverts to PINNED when DOF dies.
         val renderer = view.workspaceRenderer
+        GlassesDiagnostics.init(context)
+        diagHandler.post(diagTick)
         headTracking = HeadTracking(
             context,
             onPose = { w, x, y, z -> renderer.setHeadPose(w, x, y, z) },
@@ -47,6 +74,7 @@ class WorkspacePresentation(
             tracking.onStreamingChanged = { streaming ->
                 WorkspaceController.headTrackingActive = streaming
             }
+            tracking.onCameraPermissionNeeded = { WorkspaceController.requestCameraPermission?.invoke() }
             tracking.start()
         }
         // Ctrl+Alt+R: ask the glasses/SDK to re-anchor its frame (no-op on backends that can't).
@@ -89,6 +117,8 @@ class WorkspacePresentation(
     }
 
     override fun dismiss() {
+        diagHandler.removeCallbacks(diagTick)
+        WorkspaceController.statusBanner = null
         headTracking?.stop()
         headTracking = null
         WorkspaceController.sdkRecenter = null
@@ -105,5 +135,9 @@ class WorkspacePresentation(
         }
         surfaceView = null
         super.dismiss()
+    }
+
+    private companion object {
+        const val DIAG_INTERVAL_MS = 500L
     }
 }
