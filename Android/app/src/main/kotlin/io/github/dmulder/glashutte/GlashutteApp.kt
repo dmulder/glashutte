@@ -10,7 +10,6 @@ import io.github.dmulder.glashutte.desktop.DesktopPresentation
 import io.github.dmulder.glashutte.desktop.DesktopShortcutsStore
 import io.github.dmulder.glashutte.desktop.DesktopWallpaperStore
 import io.github.dmulder.glashutte.desktop.WorkspaceSettings
-import io.github.dmulder.glashutte.glasses.NativeGlasses
 import io.github.dmulder.glashutte.privileged.PrivilegedHotkeys
 import io.github.dmulder.glashutte.privileged.PrivilegedService
 import io.github.dmulder.glashutte.spatial.WorkspaceController
@@ -186,13 +185,10 @@ class GlashutteApp : Application() {
             resizeNWSE = R.drawable.ic_cursor_resize_nwse,
         )
 
-        // SDK-level tracker reset — Ctrl+Alt+R, matching the Windows companion's
-        // reset_origin action. Ctrl+Alt+C goes through alignVerticalToHead() (the
-        // app-side anchor, same path the visual-space toolbar's recenter uses).
-        WorkspaceController.sdkRecenter = {
-            val rc = NativeGlasses.resetOriginCarina()
-            Log.i(HOTKEY_TAG, "Ctrl+Alt+R: resetOriginCarina rc=$rc")
-        }
+        // Ctrl+Alt+R (SDK-level tracker reset, matching the Windows companion's reset_origin
+        // action) is wired by WorkspacePresentation, which owns the HeadTracking session.
+        // Ctrl+Alt+C goes through alignVerticalToHead() (the app-side anchor, same path the
+        // visual-space toolbar's recenter uses).
 
         // Raw evdev mouse deltas — bypass the Android system cursor's screen-edge
         // clamping. dx/dy come straight from the kernel as REL_X/REL_Y ticks, so

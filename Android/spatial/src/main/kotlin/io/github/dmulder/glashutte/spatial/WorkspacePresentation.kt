@@ -49,6 +49,8 @@ class WorkspacePresentation(
             }
             tracking.start()
         }
+        // Ctrl+Alt+R: ask the glasses/SDK to re-anchor its frame (no-op on backends that can't).
+        WorkspaceController.sdkRecenter = { headTracking?.recenterDevice() }
         // The DOF-retry button's hook (WorkspaceController.retryHeadTracking) is owned by
         // MainActivity, which routes it through restartHeadTracking() and reports the
         // success / failure outcome — so we don't wire it here.
@@ -89,6 +91,7 @@ class WorkspacePresentation(
     override fun dismiss() {
         headTracking?.stop()
         headTracking = null
+        WorkspaceController.sdkRecenter = null
         WorkspaceController.headTrackingActive = false
         surfaceView?.let { view ->
             WorkspaceController.unregister(view.workspaceRenderer)

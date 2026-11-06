@@ -7,13 +7,15 @@ import android.util.Log
 import java.util.concurrent.Executors
 
 /**
- * Drives head tracking: finds the glasses on USB, runs the native SDK lifecycle, polls head
- * pose, and delivers a recentred orientation quaternion via [onPose] so the workspace camera
- * can stay world-fixed.
+ * Drives head tracking: finds the glasses on USB, opens a [GlassesSession] on the active
+ * [GlassesBackend], polls head pose, and delivers a recentred orientation quaternion via
+ * [onPose] so the workspace camera can stay world-fixed.
  *
- * Capability is detected at runtime — on-glasses native DOF, Carina VIO, or Gen1/2 host IMU —
- * and the matching tracking path is used. Recentre is done in Glashutte: the first pose becomes
- * the reference, so wherever the user is looking when tracking starts becomes "straight ahead".
+ * This class owns everything that is *not* vendor specific — USB discovery and permission,
+ * the pose-stream and first-pose watchdogs with auto-retry, and app-side recentring
+ * ([PoseRecenterer]). The vendor SDK lifecycle and capability detection (on-glasses native
+ * DOF, Carina VIO, or Gen1/2 host IMU) live behind [GlassesBackend]; with the stub backend
+ * no session ever opens and tracking simply stays off.
  *
  * It knows nothing of the renderer or the rest of Glashutte — `:app` wires [onPose] to the
  * camera — so the module is a self-contained, swappable head-tracking provider.
@@ -37,6 +39,8 @@ class HeadTracking(
      * lighter, orientation-only path. Defaults to 3DOF when not supplied.
      */
     private val use6Dof: () -> Boolean = { false },
+    /** The vendor backend to open sessions on. Defaults to whatever this build supports. */
+    private val backend: GlassesBackend = GlassesBackends.default(),
 ) {
     private val appContext = context.applicationContext
     private val worker = Executors.newSingleThreadExecutor { Thread(it, "glashutte-tracking") }
@@ -83,30 +87,14 @@ class HeadTracking(
     /** Fires when the pose stream starts or stops. Posted from the poll thread. */
     var onStreamingChanged: ((streaming: Boolean) -> Unit)? = null
 
-    // Reference orientation for recentre; the first pose fills it in.
-    @Volatile private var haveRef = false
-    private var refW = 1f
-    private var refX = 0f
-    private var refY = 0f
-    private var refZ = 0f
-    // Yaw-only twist of the reference orientation, normalised to (cos, sin) about world Y.
-    // Recentre cancels HEADING only — pitch/roll stay gravity-anchored — so a head yaw is
-    // always a rotation about true vertical and never bleeds into roll (no scene tilt).
-    private var refYawCos = 1f
-    private var refYawSin = 0f
+    // App-side heading recentre (and 6DOF position recentre); the first pose after a (re)start
+    // becomes the reference. Only touched from the pose-polling thread.
+    private val recenterer = PoseRecenterer()
+    private val orientationOut = FloatArray(4)
+    private val positionOut = FloatArray(3)
 
-    // Reference position for recentre (Carina 6DOF only); the first pose fills it in.
-    @Volatile private var haveRefPos = false
-    private var refPx = 0f
-    private var refPy = 0f
-    private var refPz = 0f
-
-    /**
-     * Whether the active tracking path reports 6DOF position. True only on the Carina VIO
-     * poll path (`pose[0..2]` = px,py,pz); false on orientation-only paths, where those
-     * three floats are roll/pitch/yaw and must not be fed as a camera translation.
-     */
-    @Volatile private var providesPosition = false
+    /** The open backend session, or null while tracking is off. Created on [worker]. */
+    @Volatile private var session: GlassesSession? = null
 
     /**
      * Begin tracking: locate the glasses on USB and request permission. Idempotent — if
@@ -157,10 +145,7 @@ class HeadTracking(
         pollThread = null
         worker.execute {
             synchronized(lifecycleLock) {
-                runCatching { NativeGlasses.stopCarinaPollThread() }
-                runCatching { NativeGlasses.stop() }
-                runCatching { NativeGlasses.shutdown() }
-                runCatching { NativeGlasses.destroy() }
+                closeSession()
                 runCatching { connection?.close() }
                 connection = null
             }
@@ -180,56 +165,36 @@ class HeadTracking(
         worker.execute { startSdk(pid, fd) }
     }
 
-    /** Runs on [worker]: the SDK lifecycle, then the capability-specific tracking path. */
+    /** Runs on [worker]: open a backend session, then start polling its poses. */
     private fun startSdk(pid: Int, fd: Int) {
-        Log.i(TAG, "libglasses ${runCatching { NativeGlasses.getVersion() }.getOrDefault("?")}")
-        if (!NativeGlasses.create(pid, fd)) {
-            Log.e(TAG, "NativeGlasses.create failed")
+        Log.i(TAG, "opening session on backend '${backend.name}' (pid=0x${pid.toString(16)})")
+        val opened = backend.open(pid, fd, SessionOptions(sixDof = use6Dof()))
+        if (opened == null) {
+            Log.w(TAG, "backend '${backend.name}' did not open a session — head tracking off")
             return
         }
-        val nativeDof = NativeGlasses.isProductSupportNativeDof(pid)
-        val type = NativeGlasses.getDeviceType()
-        val carina = type == NativeGlasses.DEVICE_TYPE_CARINA
-
-        // Carina needs its DOF type set after create and before initialize. 6DOF (the SDK
-        // default) additionally streams px,py,pz for positional parallax but runs the
-        // cameras continuously; 3DOF is the lighter, orientation-only path. Controlled by
-        // the [use6Dof] setting and applied here on each (re)connect.
-        val want6Dof = carina && !nativeDof && use6Dof()
-        if (carina && !nativeDof) {
-            NativeGlasses.setDofTypeCarina(want6Dof)
-        }
-        NativeGlasses.registerStateCallback()
-        NativeGlasses.initialize()
-        NativeGlasses.start()
-
-        // Position parallax is only available when Carina runs in 6DOF (then pose[0..2] is
-        // px,py,pz). In 3DOF — and on the native-DOF / Gen1/2 paths — those floats aren't a
-        // usable world position, so we don't feed them and the camera stays at the origin.
-        providesPosition = false
-        when {
-            nativeDof -> {
-                Log.i(TAG, "tracking path: native on-glasses DOF")
-                NativeGlasses.setupNativeDofDevice()
-            }
-            carina -> {
-                Log.i(
-                    TAG,
-                    "tracking path: Carina VIO (deviceType=$type) " +
-                        if (want6Dof) "— 6DOF, position/parallax on" else "— 3DOF, orientation only",
-                )
-                providesPosition = want6Dof
-                NativeGlasses.startCarinaPollThread()
-            }
-            else -> {
-                Log.i(TAG, "tracking path: Gen1/2 host IMU (deviceType=$type)")
-                NativeGlasses.openImu()
-            }
-        }
-        startPolling()
+        session = opened
+        Log.i(TAG, "session open: ${opened.capabilities}")
+        startPolling(opened)
     }
 
-    private fun startPolling() {
+    /** Close the current session, if any. Callers hold [lifecycleLock]. */
+    private fun closeSession() {
+        val current = session ?: return
+        session = null
+        runCatching { current.close() }
+    }
+
+    /**
+     * Ask the device/SDK to re-anchor its frame on where the user is looking (Ctrl+Alt+R).
+     * Returns false when no session is open or the backend cannot do it.
+     */
+    fun recenterDevice(): Boolean = session?.recenter() ?: false
+
+    /** Capabilities of the open session, or null while tracking is off. */
+    fun capabilities(): GlassesCapabilities? = session?.capabilities
+
+    private fun startPolling(active: GlassesSession) {
         polling = true
         lastPoseAtMs = 0L
         streaming = false
@@ -240,19 +205,14 @@ class HeadTracking(
         // Carina VIO re-initialises with a fresh internal origin, so the first pose of
         // THIS session must become the new reference — otherwise raw poses in the new
         // frame get recentred against the old origin and the horizon tilts/drifts.
-        haveRef = false
-        haveRefPos = false
+        recenterer.reset()
         pollThread = Thread {
             while (polling) {
-                if (NativeGlasses.isPoseFresh()) {
-                    val pose = NativeGlasses.getPose()
-                    // pose[3..6] is the orientation quaternion (w, x, y, z) for every device.
-                    if (pose.size >= 7) {
-                        firstPoseArrived = true
-                        feedPose(pose[3], pose[4], pose[5], pose[6])
-                        // pose[0..2] is the world position (px, py, pz) on Carina only.
-                        if (providesPosition) feedPosition(pose[0], pose[1], pose[2])
-                    }
+                val pose = active.pollPose()
+                if (pose != null) {
+                    firstPoseArrived = true
+                    feedPose(pose.w, pose.x, pose.y, pose.z)
+                    if (pose.hasPosition) feedPosition(pose.px, pose.py, pose.pz)
                 }
                 checkInitialPoseWatchdog()
                 checkStreamWatchdog()
@@ -323,10 +283,7 @@ class HeadTracking(
         polling = false
         pollThread?.interrupt()
         pollThread = null
-        runCatching { NativeGlasses.stopCarinaPollThread() }
-        runCatching { NativeGlasses.stop() }
-        runCatching { NativeGlasses.shutdown() }
-        runCatching { NativeGlasses.destroy() }
+        closeSession()
         runCatching { connection?.close() }
         connection = null
         usb?.release()
@@ -363,33 +320,8 @@ class HeadTracking(
             Log.i(TAG, "pose stream live (DOF up)")
             runCatching { onStreamingChanged?.invoke(true) }
         }
-        if (!haveRef) {
-            refW = w; refX = x; refY = y; refZ = z
-            // Yaw-only twist of the reference about world Y: normalise (w, 0, y, 0). Storing
-            // the unit (cos, sin) lets recentre and parallax share one heading rotation.
-            val n = kotlin.math.sqrt(w * w + y * y)
-            if (n > 1e-6f) { refYawCos = w / n; refYawSin = y / n }
-            else { refYawCos = 1f; refYawSin = 0f }
-            haveRef = true
-        }
-        // YAW-ONLY recentre: effective = conjugate(refYawTwist) * raw.
-        //
-        // We cancel only the reference HEADING (rotation about world/gravity Y), leaving
-        // pitch and roll exactly as Carina reports them — gravity-anchored. Because the
-        // recentre rotation is purely about world Y, a head yaw is always a rotation about
-        // true vertical and can never bleed into roll, so the scene no longer tilts as you
-        // pan ("screens angled vertically"). The earlier full-orientation recentre folded
-        // the reference's pitch into the yaw axis, which is what caused the tilt.
-        //
-        // Keeping pitch truthful also defines a single rigid, gravity-aligned world frame,
-        // which is what positional parallax ([feedPosition]) needs to stay consistent.
-        // conjugate(refYawTwist) = (cos, 0, -sin, 0).
-        val c = refYawCos; val s = refYawSin
-        val ew = c * w + s * y
-        val ex = c * x - s * z
-        val ey = c * y - s * w
-        val ez = c * z + s * x
-        onPose(ew, ex, ey, ez)
+        recenterer.recenterOrientation(w, x, y, z, orientationOut)
+        onPose(orientationOut[0], orientationOut[1], orientationOut[2], orientationOut[3])
     }
 
     /**
@@ -401,22 +333,8 @@ class HeadTracking(
      * workspace — real positional parallax. Only called on 6DOF (Carina) paths.
      */
     private fun feedPosition(px: Float, py: Float, pz: Float) {
-        if (!haveRefPos) {
-            refPx = px; refPy = py; refPz = pz
-            haveRefPos = true
-        }
-        val dx = px - refPx
-        val dy = py - refPy
-        val dz = pz - refPz
-        // Rotate the world displacement by -refYaw about Y (same heading recentre as the
-        // orientation). cos/sin here are the full-angle terms derived from the half-angle
-        // (cos, sin) twist: cosθ = c²−s², sinθ = 2cs.
-        val c = refYawCos; val s = refYawSin
-        val cosT = c * c - s * s
-        val sinT = 2f * c * s
-        val rx = cosT * dx - sinT * dz
-        val rz = sinT * dx + cosT * dz
-        onPosition?.invoke(rx, dy, rz)
+        recenterer.recenterPosition(px, py, pz, positionOut)
+        onPosition?.invoke(positionOut[0], positionOut[1], positionOut[2])
     }
 
     private companion object {

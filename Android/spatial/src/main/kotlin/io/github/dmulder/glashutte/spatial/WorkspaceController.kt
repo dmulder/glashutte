@@ -100,8 +100,8 @@ object WorkspaceController {
     var appMediaPause: ((displayId: Int) -> Unit)? = null
 
     /**
-     * SDK-level reset of the head tracker (`NativeGlasses.resetOriginCarina`). Wired by the
-     * app to the glasses module. Invoked by the Ctrl+Alt+R global hotkey, matching the
+     * SDK-level reset of the head tracker (`GlassesSession.recenter`). Wired by the
+     * workspace presentation. Invoked by the Ctrl+Alt+R global hotkey, matching the
      * Windows companion's `reset_origin` action. Distinct from [alignVerticalToHead], which
      * is the app-side anchor used by the visual-space toolbar's recenter button and by
      * Ctrl+Alt+C.

@@ -12,7 +12,7 @@ package io.github.dmulder.glashutte.privileged
  *  - Ctrl+Alt+-         → [HK_ZOOM_OUT]           → `WorkspaceController.pinch(1/1.25)`
  *  - Ctrl+Alt+Z         → [HK_CYCLE_SCREEN_BAND]  → `WorkspaceController.cycleScreenBand()`
  *  - Ctrl+Alt+X         → [HK_TOGGLE_VIEW_MODE]   → `WorkspaceController.setViewMode(opposite)`
- *  - Ctrl+Alt+R         → [HK_SDK_RECENTER]       → `NativeGlasses.resetOriginCarina()`
+ *  - Ctrl+Alt+R         → [HK_SDK_RECENTER]       → `GlassesSession.recenter()` (Carina origin reset)
  *  - Ctrl+Alt+C         → [HK_ANCHOR_POSE]        → `WorkspaceController.alignVerticalToHead()`
  *
  * Ctrl+Alt+Wheel is handled in `MainActivity.dispatchGenericMotionEvent` directly — the
