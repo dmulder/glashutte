@@ -99,6 +99,23 @@ class HeadTracking(
     private val orientationOut = FloatArray(4)
     private val positionOut = FloatArray(3)
 
+    // Latency pipeline (see [LatencyExperiments]). With pull-on-render the GL thread calls
+    // [pullPose] once per frame: it reads the backend's newest timestamped sample, recentres
+    // it and publishes it as one immutable [TimedPose]. [poseLock] guards the recenterer and
+    // buffer because that path runs on the GL thread while [startPolling] resets them.
+    private val poseLock = Any()
+    private val poseBuffer = PoseBuffer()
+    private val pullOrientation = FloatArray(4)
+    private val pullPosition = FloatArray(3)
+    private val extrapolated = FloatArray(4)
+    @Volatile private var lastDeliveredSampleNanos = 0L
+    private var lastSeenSampleNanos = 0L
+    private var appliedLatency: LatencyExperiments.Settings? = null
+
+    init {
+        LatencyExperiments.init(appContext)
+    }
+
     /** The open backend session, or null while tracking is off. Created on [worker]. */
     @Volatile private var session: GlassesSession? = null
 
@@ -246,17 +263,38 @@ class HeadTracking(
         // Carina VIO re-initialises with a fresh internal origin, so the first pose of
         // THIS session must become the new reference — otherwise raw poses in the new
         // frame get recentred against the old origin and the horizon tilts/drifts.
-        recenterer.reset()
+        synchronized(poseLock) {
+            recenterer.reset()
+            poseBuffer.reset()
+        }
+        lastSeenSampleNanos = 0L
+        lastDeliveredSampleNanos = 0L
+        appliedLatency = null
         pollThread = Thread {
             while (polling) {
-                val pose = active.pollPose()
+                val latency = LatencyExperiments.current()
+                applyLatency(active, latency)
+                // Pull-on-render: this loop only supervises (diagnostics + watchdogs) and the
+                // GL thread reads the pose itself in [pullPose]. Otherwise it is the classic
+                // poll-and-push delivery.
+                val pose = if (latency.pullOnRender) {
+                    active.latestPose()?.takeIf { it.timestampNanos != lastSeenSampleNanos }
+                        ?.also { lastSeenSampleNanos = it.timestampNanos }
+                } else {
+                    active.pollPose()
+                }
                 if (pose != null) {
                     firstPoseArrived = true
                     GlassesDiagnostics.onPoseSample(
                         pose.w, pose.x, pose.y, pose.z, pose.hasPosition, pose.px, pose.py, pose.pz,
                     )
-                    feedPose(pose.w, pose.x, pose.y, pose.z)
-                    if (pose.hasPosition) feedPosition(pose.px, pose.py, pose.pz)
+                    if (latency.pullOnRender) {
+                        noteStreamAlive()
+                    } else {
+                        lastDeliveredSampleNanos = pose.timestampNanos
+                        feedPose(pose.w, pose.x, pose.y, pose.z)
+                        if (pose.hasPosition) feedPosition(pose.px, pose.py, pose.pz)
+                    }
                 }
                 GlassesDiagnostics.tick(active::diagnostics)
                 checkInitialPoseWatchdog()
@@ -369,8 +407,8 @@ class HeadTracking(
         }
     }
 
-    /** Recentre heading against the reference orientation, then deliver via [onPose]. */
-    private fun feedPose(w: Float, x: Float, y: Float, z: Float) {
+    /** Record that a pose just arrived and flip the stream-live latch (and callback) if needed. */
+    private fun noteStreamAlive() {
         lastPoseAtMs = System.currentTimeMillis()
         if (!streaming) {
             streaming = true
@@ -381,7 +419,12 @@ class HeadTracking(
             GlassesDiagnostics.i(TAG, "pose stream live (DOF up)")
             runCatching { onStreamingChanged?.invoke(true) }
         }
-        recenterer.recenterOrientation(w, x, y, z, orientationOut)
+    }
+
+    /** Recentre heading against the reference orientation, then deliver via [onPose]. */
+    private fun feedPose(w: Float, x: Float, y: Float, z: Float) {
+        noteStreamAlive()
+        synchronized(poseLock) { recenterer.recenterOrientation(w, x, y, z, orientationOut) }
         GlassesDiagnostics.onPoseDelivered(orientationOut[0], orientationOut[1], orientationOut[2], orientationOut[3])
         onPose(orientationOut[0], orientationOut[1], orientationOut[2], orientationOut[3])
     }
@@ -395,8 +438,76 @@ class HeadTracking(
      * workspace — real positional parallax. Only called on 6DOF (Carina) paths.
      */
     private fun feedPosition(px: Float, py: Float, pz: Float) {
-        recenterer.recenterPosition(px, py, pz, positionOut)
+        synchronized(poseLock) { recenterer.recenterPosition(px, py, pz, positionOut) }
         onPosition?.invoke(positionOut[0], positionOut[1], positionOut[2])
+    }
+
+    /**
+     * Push the active latency settings to the backend (SDK predict_time, native poll period)
+     * the first time a session sees them and whenever they change.
+     */
+    private fun applyLatency(active: GlassesSession, latency: LatencyExperiments.Settings) {
+        if (latency == appliedLatency) return
+        appliedLatency = latency
+        runCatching { active.applyLatency(latency.sdkPredictSeconds, latency.nativePollIntervalMicros) }
+            .onFailure { GlassesDiagnostics.w(TAG, "applyLatency failed: $it") }
+        GlassesDiagnostics.i(
+            GlassesDiagnostics.TAG,
+            "latency settings active: ${latency.describe()} " +
+                "(sdk predict_time=${"%.1f".format(latency.sdkPredictSeconds * 1000)} ms, " +
+                "native poll ${latency.nativePollIntervalMicros} us)",
+        )
+    }
+
+    /**
+     * Called by the renderer on the GL thread at the start of every frame ([HeadPoseSource]).
+     *
+     * With pull-on-render ON it reads the backend's newest timestamped sample, recentres it,
+     * publishes it as one immutable [TimedPose] and fills [out] — applying app-side
+     * extrapolation when that prediction mode is selected. Returns false (leaving [out]
+     * untouched) when pull-on-render is OFF or no pose exists yet, so the renderer keeps the
+     * value pushed through [onPose].
+     */
+    fun pullPose(nowNanos: Long, out: PulledPose): Boolean {
+        LatencyTelemetry.onFrame(nowNanos)
+        val settings = LatencyExperiments.current()
+        if (!settings.pullOnRender) {
+            val delivered = lastDeliveredSampleNanos
+            if (delivered != 0L) LatencyTelemetry.onPoseUsed(nowNanos - delivered, 0L)
+            return false
+        }
+        val sample = session?.latestPose() ?: return false
+        val pose = synchronized(poseLock) {
+            recenterer.recenterOrientation(sample.w, sample.x, sample.y, sample.z, pullOrientation)
+            var hasPos = false
+            if (sample.hasPosition) {
+                recenterer.recenterPosition(sample.px, sample.py, sample.pz, pullPosition)
+                hasPos = true
+            }
+            poseBuffer.publish(
+                pullOrientation[0], pullOrientation[1], pullOrientation[2], pullOrientation[3],
+                hasPos, pullPosition[0], pullPosition[1], pullPosition[2],
+                sample.timestampNanos,
+            )
+        }
+        val age = nowNanos - pose.timestampNanos
+        val lookahead = if (settings.appExtrapolation) {
+            PoseExtrapolator.extrapolate(
+                pose, PoseExtrapolator.lookaheadNanos(age, settings.predictionMs.toFloat()), extrapolated,
+            )
+        } else {
+            extrapolated[0] = pose.w; extrapolated[1] = pose.x; extrapolated[2] = pose.y; extrapolated[3] = pose.z
+            0L
+        }
+        out.w = extrapolated[0]; out.x = extrapolated[1]; out.y = extrapolated[2]; out.z = extrapolated[3]
+        out.hasPosition = pose.hasPosition
+        out.px = pose.px; out.py = pose.py; out.pz = pose.pz
+        out.sequence = pose.sequence
+        out.ageNanos = age
+        out.lookaheadNanos = lookahead
+        LatencyTelemetry.onPoseUsed(age, lookahead)
+        GlassesDiagnostics.onPoseDelivered(out.w, out.x, out.y, out.z)
+        return true
     }
 
     private companion object {

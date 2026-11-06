@@ -173,16 +173,32 @@ class VitureGlassesBackend : GlassesBackend {
 
         @Volatile private var closed = false
 
+        private val scratch = ThreadLocal.withInitial { FloatArray(7) }
+
         override fun pollPose(): PoseSample? {
             if (closed || !NativeGlasses.isPoseFresh()) return null
-            val pose = NativeGlasses.getPose()
+            return readPose()
+        }
+
+        override fun latestPose(): PoseSample? = if (closed) null else readPose()
+
+        override fun applyLatency(predictSeconds: Double, pollIntervalMicros: Int) {
+            if (closed) return
+            NativeGlasses.setPredictTimeSeconds(predictSeconds)
+            NativeGlasses.setPollIntervalMicros(pollIntervalMicros)
+        }
+
+        private fun readPose(): PoseSample? {
+            val pose = scratch.get()!!
+            val ts = NativeGlasses.getPoseTimed(pose)
+            if (ts == 0L) return null
             // pose[3..6] is the orientation quaternion (w, x, y, z) for every device;
             // pose[0..2] is the world position (px, py, pz) on Carina only.
-            if (pose.size < 7) return null
             return PoseSample(
                 w = pose[3], x = pose[4], y = pose[5], z = pose[6],
                 hasPosition = capabilities.providesPosition,
                 px = pose[0], py = pose[1], pz = pose[2],
+                timestampNanos = ts,
             )
         }
 

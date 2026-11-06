@@ -14,6 +14,8 @@
 #include <thread>
 #include <chrono>
 #include <cstring>
+#include <cstdint>
+#include <ctime>
 
 #include "viture_version.h"
 #include "viture_glasses_provider.h"
@@ -47,8 +49,22 @@ struct PoseState {
                            // Carina:    [px,py,pz,qw,qx,qy,qz]
     bool fresh = false;
     int pose_status = 1;   // 0=stable, 1=unstable (Carina only)
+    int64_t ts_ns = 0;     // CLOCK_MONOTONIC (== System.nanoTime) when `data` was stored; 0 = none
 };
 static PoseState g_pose;
+
+// CLOCK_MONOTONIC in nanoseconds: the same clock as Java's System.nanoTime(), so the Kotlin
+// side can compute pose age without any conversion.
+static int64_t monotonic_ns() {
+    timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return static_cast<int64_t>(ts.tv_sec) * 1000000000LL + ts.tv_nsec;
+}
+
+// Latency experiments (set from the diagnostics screen; defaults reproduce the previous
+// behaviour: no SDK-side prediction, ~120 Hz polling).
+static std::atomic<double> g_predict_time_s{0.0};
+static std::atomic<int>    g_poll_interval_us{8333};
 
 struct DeviceState {
     std::mutex mtx;
@@ -139,6 +155,7 @@ static void imu_pose_cb(float* data, uint64_t /*ts*/) {
     g_stats.imu_pose_cb++;
     std::lock_guard<std::mutex> lk(g_pose.mtx);
     memcpy(g_pose.data, data, 7 * sizeof(float));
+    g_pose.ts_ns = monotonic_ns();
     g_pose.fresh = true;
 }
 
@@ -155,7 +172,8 @@ static void carina_poll_fn() {
     while (g_poll_running) {
         int status = 1;
         if (g_handle) {
-            int rc = xr_device_provider_get_gl_pose_carina(g_handle, pose, 0.0, &status);
+            int rc = xr_device_provider_get_gl_pose_carina(
+                g_handle, pose, g_predict_time_s.load(std::memory_order_relaxed), &status);
             g_stats.poll_attempts++;
             g_stats.last_poll_rc = rc;
             if (rc == VITURE_GLASSES_SUCCESS) {
@@ -177,6 +195,7 @@ static void carina_poll_fn() {
                 std::lock_guard<std::mutex> lk(g_pose.mtx);
                 memcpy(g_pose.data, pose, 7 * sizeof(float));
                 g_pose.pose_status = status;
+                g_pose.ts_ns       = monotonic_ns();
                 g_pose.fresh       = true;
             } else {
                 long f = ++g_stats.poll_fail;
@@ -186,7 +205,8 @@ static void carina_poll_fn() {
                 }
             }
         }
-        std::this_thread::sleep_for(std::chrono::microseconds(8333));  // ~120 Hz
+        std::this_thread::sleep_for(
+            std::chrono::microseconds(g_poll_interval_us.load(std::memory_order_relaxed)));
     }
 }
 
@@ -199,6 +219,7 @@ static void reset_pose_state() {
     memset(g_pose.data, 0, sizeof(g_pose.data));
     g_pose.fresh       = false;
     g_pose.pose_status = 1;
+    g_pose.ts_ns       = 0;
 }
 
 static void reset_dev_state() {
@@ -439,6 +460,42 @@ Java_io_github_dmulder_glashutte_glasses_NativeGlasses_getPose(JNIEnv* env, jobj
     return arr;
 }
 
+// Newest cached pose WITHOUT consuming the fresh flag and without allocating: copies the 7
+// floats into `out` and returns the sample's CLOCK_MONOTONIC timestamp in ns (0 = no pose yet).
+// Cheap enough to call once per rendered frame.
+JNIEXPORT jlong JNICALL
+Java_io_github_dmulder_glashutte_glasses_NativeGlasses_getPoseTimed(JNIEnv* env, jobject, jfloatArray out) {
+    if (!out || env->GetArrayLength(out) < 7) return 0;
+    float local[7];
+    int64_t ts;
+    {
+        std::lock_guard<std::mutex> lk(g_pose.mtx);
+        memcpy(local, g_pose.data, sizeof(local));
+        ts = g_pose.ts_ns;
+    }
+    if (ts == 0) return 0;
+    env->SetFloatArrayRegion(out, 0, 7, local);
+    return static_cast<jlong>(ts);
+}
+
+// Seconds of look-ahead handed to get_gl_pose_carina (its predict_time). 0 = no prediction.
+JNIEXPORT void JNICALL
+Java_io_github_dmulder_glashutte_glasses_NativeGlasses_setPredictTimeSeconds(JNIEnv*, jobject, jdouble seconds) {
+    double s = seconds;
+    if (!(s >= 0.0)) s = 0.0;
+    if (s > 0.1) s = 0.1;
+    g_predict_time_s.store(s, std::memory_order_relaxed);
+}
+
+// Native poll period in microseconds (clamped to 1..20 ms).
+JNIEXPORT void JNICALL
+Java_io_github_dmulder_glashutte_glasses_NativeGlasses_setPollIntervalMicros(JNIEnv*, jobject, jint micros) {
+    int us = micros;
+    if (us < 1000) us = 1000;
+    if (us > 20000) us = 20000;
+    g_poll_interval_us.store(us, std::memory_order_relaxed);
+}
+
 JNIEXPORT jboolean JNICALL
 Java_io_github_dmulder_glashutte_glasses_NativeGlasses_isPoseFresh(JNIEnv*, jobject) {
     std::lock_guard<std::mutex> lk(g_pose.mtx);
@@ -560,14 +617,16 @@ Java_io_github_dmulder_glashutte_glasses_NativeGlasses_getNativeStats(JNIEnv* en
              "poll_attempts=%ld;poll_ok=%ld;poll_fail=%ld;last_poll_rc=%d;poll_bad_quat=%ld;"
              "pose_status=%d;imu_pose_cb=%ld;carina_pose_cb=%ld;carina_imu_cb=%ld;"
              "carina_camera_frames=%ld;camera_cb_wanted=%d;camera_wh=%dx%d;"
-             "carina_cb_rc=%d;sdk_log_hooked=%d;poll_running=%d;handle=%d",
+             "carina_cb_rc=%d;sdk_log_hooked=%d;poll_running=%d;handle=%d;"
+             "predict_ms=%.1f;poll_interval_us=%d",
              g_stats.poll_attempts.load(), g_stats.poll_ok.load(), g_stats.poll_fail.load(),
              g_stats.last_poll_rc.load(), g_stats.poll_bad_quat.load(),
              g_stats.pose_status.load(), g_stats.imu_pose_cb.load(), g_stats.carina_pose_cb.load(),
              g_stats.carina_imu_cb.load(), g_stats.carina_camera_cb.load(),
              g_stats.camera_cb_wanted.load(), g_stats.cam_w.load(), g_stats.cam_h.load(),
              g_stats.carina_cb_rc.load(), g_sdk_log_hooked.load(), g_poll_running.load() ? 1 : 0,
-             g_handle ? 1 : 0);
+             g_handle ? 1 : 0,
+             g_predict_time_s.load() * 1000.0, g_poll_interval_us.load());
     return env->NewStringUTF(buf);
 }
 

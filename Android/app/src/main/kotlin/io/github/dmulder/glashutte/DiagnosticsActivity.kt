@@ -29,6 +29,8 @@ import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import io.github.dmulder.glashutte.glasses.GlassesDiagnostics
 import io.github.dmulder.glashutte.glasses.GlassesUsb
+import io.github.dmulder.glashutte.glasses.LatencyExperiments
+import io.github.dmulder.glashutte.glasses.PredictionMode
 import io.github.dmulder.glashutte.glasses.ProjectionExperiments
 import io.github.dmulder.glashutte.glasses.TrackingExperiments
 import io.github.dmulder.glashutte.spatial.WorkspaceController
@@ -58,6 +60,7 @@ class DiagnosticsActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         GlassesDiagnostics.init(applicationContext)
+        LatencyExperiments.init(applicationContext)
         GlassesUsb.inventory(applicationContext)
 
         val root = LinearLayout(this).apply {
@@ -100,6 +103,27 @@ class DiagnosticsActivity : Activity() {
             ) {
                 ProjectionExperiments.setCalibratedProjection(this, it)
                 GlassesDiagnostics.i(TAG, "diagnostics screen: calibrated projection set to $it")
+            },
+        )
+
+        root.addView(
+            label(
+                "Latency experiments (apply live, no restart; watch the 'latency:' line under " +
+                    "logcat tag GlashutteDiag. Defaults: pull-on-render ON, prediction OFF, highest refresh ON)",
+                12f, bold = true,
+            ),
+        )
+        val latency = LatencyExperiments.current()
+        root.addView(
+            check("Atomic pose, pulled on the render thread each frame", latency.pullOnRender) { on ->
+                LatencyExperiments.update(this) { it.copy(pullOnRender = on) }
+            },
+        )
+        root.addView(predictionModeSpinner())
+        root.addView(predictionAmountSpinner())
+        root.addView(
+            check("Select the glasses display's highest refresh rate", latency.highestRefresh) { on ->
+                LatencyExperiments.update(this) { it.copy(highestRefresh = on) }
             },
         )
 
@@ -225,6 +249,47 @@ class DiagnosticsActivity : Activity() {
         spinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
             override fun onItemSelected(p: AdapterView<*>?, v: View?, pos: Int, id: Long) {
                 TrackingExperiments.setPathOverride(this@DiagnosticsActivity, values[pos])
+            }
+            override fun onNothingSelected(p: AdapterView<*>?) = Unit
+        }
+        return spinner
+    }
+
+    private fun predictionModeSpinner(): View {
+        val values = PredictionMode.values()
+        val spinner = Spinner(this)
+        spinner.adapter = ArrayAdapter(
+            this,
+            android.R.layout.simple_spinner_dropdown_item,
+            values.map { "Prediction: ${it.label}" },
+        )
+        spinner.setSelection(values.indexOf(LatencyExperiments.current().predictionMode))
+        spinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(p: AdapterView<*>?, v: View?, pos: Int, id: Long) {
+                if (values[pos] != LatencyExperiments.current().predictionMode) {
+                    LatencyExperiments.update(this@DiagnosticsActivity) { it.copy(predictionMode = values[pos]) }
+                }
+            }
+            override fun onNothingSelected(p: AdapterView<*>?) = Unit
+        }
+        return spinner
+    }
+
+    private fun predictionAmountSpinner(): View {
+        val values = LatencyExperiments.PREDICTION_CHOICES_MS
+        val spinner = Spinner(this)
+        spinner.adapter = ArrayAdapter(
+            this,
+            android.R.layout.simple_spinner_dropdown_item,
+            values.map { "Prediction amount: $it ms" },
+        )
+        val current = LatencyExperiments.current().predictionMs
+        spinner.setSelection(values.indexOf(current).let { if (it >= 0) it else values.indexOf(LatencyExperiments.DEFAULT_PREDICTION_MS) })
+        spinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(p: AdapterView<*>?, v: View?, pos: Int, id: Long) {
+                if (values[pos] != LatencyExperiments.current().predictionMs) {
+                    LatencyExperiments.update(this@DiagnosticsActivity) { it.copy(predictionMs = values[pos]) }
+                }
             }
             override fun onNothingSelected(p: AdapterView<*>?) = Unit
         }
