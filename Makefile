@@ -25,6 +25,8 @@ VITURE         ?= auto
 # Extra Gradle arguments (e.g. GRADLE_ARGS=--info) and extra container-run arguments.
 GRADLE_ARGS    ?=
 RUN_ARGS       ?=
+# Optional Maven Central mirror or organization repository cache.
+MAVEN_CENTRAL_URL ?=
 
 OUT_ABS  := $(abspath $(OUTPUT_DIR))
 SDK_ABS  := $(abspath $(VITURE_SDK_DIR))
@@ -68,6 +70,7 @@ RUN = $(CONTAINER_ENGINE) run --rm $(TTY_FLAGS) --platform $(PLATFORM) $(USER_FL
 	-v $(WORK_VOLUME):/work \
 	$(SDK_MOUNT) \
 	-e GLASHUTTE_VITURE_SDK=$(VITURE) -e GRADLE_ARGS="$(GRADLE_ARGS)" \
+	-e MAVEN_CENTRAL_URL="$(MAVEN_CENTRAL_URL)" \
 	$(RUN_ARGS) $(IMAGE)
 
 .DEFAULT_GOAL := help
@@ -83,6 +86,7 @@ help: ## Show this help
 	@printf "  VITURE=off        force the stub backend even if an SDK is present\n"
 	@printf "  BASE_IMAGE        base image (default: docker.io/library/ubuntu:24.04)\n"
 	@printf "  GRADLE_ARGS, RUN_ARGS, IMAGE, PLATFORM, CACHE_VOLUME, WORK_VOLUME, MOUNT_LABEL\n"
+	@printf "  MAVEN_CENTRAL_URL optional Maven Central mirror or repository cache URL\n"
 	@printf "\nThe VITURE SDK is never baked into the image or committed.\n"
 
 check-engine:

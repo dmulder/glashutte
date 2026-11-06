@@ -44,13 +44,6 @@ object PrivilegedService {
         /** Android < 11 — the wireless-debugging path does not exist. */
         UNSUPPORTED,
 
-        /**
-         * Developer options is locked. Wireless Debugging can't be turned on until the user
-         * unlocks Developer options (Settings → About → tap Build number 7×), so the wizard
-         * walks them through that first.
-         */
-        NEEDS_DEVELOPER_OPTIONS,
-
         /** Paired before, but the connect service is not on mDNS (wireless debugging off). */
         NEEDS_WIRELESS_DEBUGGING,
 
@@ -91,7 +84,14 @@ object PrivilegedService {
     /** Call once, from the Application. Computes the initial state from persisted identity. */
     fun init(context: Context) {
         appContext = context.applicationContext
+        Log.d(
+            TAG,
+            "init: sdk=${Build.VERSION.SDK_INT}, targetSdk=${context.applicationInfo.targetSdkVersion}, " +
+                "uid=${android.os.Process.myUid()}",
+        )
+        logDeveloperOptions(context)
         state = computeInitialState(context)
+        Log.d(TAG, "init: state=$state")
         notifyListeners()
     }
 
@@ -100,27 +100,36 @@ object PrivilegedService {
 
     private fun computeInitialState(context: Context): State = when {
         Build.VERSION.SDK_INT < Build.VERSION_CODES.R -> State.UNSUPPORTED
-        !isDevOptionsEnabled(context) -> State.NEEDS_DEVELOPER_OPTIONS
         hasPaired(context) -> State.NEEDS_WIRELESS_DEBUGGING
         else -> State.NEEDS_PAIRING
     }
 
-    /** Developer options unlocked? Read-only access to Settings.Global; no permission needed. */
-    private fun isDevOptionsEnabled(context: Context): Boolean = runCatching {
-        Settings.Global.getInt(
-            context.contentResolver,
-            Settings.Global.DEVELOPMENT_SETTINGS_ENABLED,
-            0,
-        ) != 0
-    }.getOrDefault(false)
+    /**
+     * Diagnostic only: the app can receive 0 even when the shell reads 1 on the same device.
+     * Pairing and connecting to ADB determine availability; this value must not block setup.
+     */
+    private fun logDeveloperOptions(context: Context) {
+        runCatching {
+            val value = Settings.Global.getString(
+                context.contentResolver,
+                Settings.Global.DEVELOPMENT_SETTINGS_ENABLED,
+            )
+            Log.d(TAG, "Developer options (advisory): development_settings_enabled=$value")
+        }.onFailure {
+            Log.w(TAG, "Cannot read Developer options; continuing setup", it)
+        }
+    }
 
     /**
      * Whether Glashutte has previously paired successfully. A separate marker file from the key
      * — the key is generated and persisted on first use of [AdbConnectionManager], whether or
      * not the device ever accepted it, so the key file's existence proves nothing.
      */
-    private fun hasPaired(context: Context): Boolean =
-        File(context.filesDir, PAIRED_MARKER).exists()
+    private fun hasPaired(context: Context): Boolean {
+        val paired = File(context.filesDir, PAIRED_MARKER).exists()
+        Log.d(TAG, "Pairing marker present: $paired")
+        return paired
+    }
 
     private fun markPaired(context: Context, paired: Boolean) {
         val marker = File(context.filesDir, PAIRED_MARKER)
@@ -140,7 +149,11 @@ object PrivilegedService {
     }
 
     private fun notifyListeners() {
-        listeners.forEach { runCatching { it() } }
+        listeners.forEach { listener ->
+            runCatching { listener() }.onFailure {
+                Log.w(TAG, "Privileged state listener failed (state=$state)", it)
+            }
+        }
     }
 
     /**
@@ -148,10 +161,20 @@ object PrivilegedService {
      * server. Idempotent; safe to call from anywhere. The state machine reflects progress.
      */
     fun ensureRunning() {
+        Log.d(TAG, "ensureRunning requested: state=$state, initialized=${appContext != null}")
         worker.execute {
-            val ctx = appContext ?: return@execute
-            if (state == State.UNSUPPORTED) return@execute
-            if (state == State.READY && service != null) return@execute
+            val ctx = appContext ?: run {
+                Log.w(TAG, "ensureRunning skipped: service has not been initialized")
+                return@execute
+            }
+            if (state == State.UNSUPPORTED) {
+                Log.d(TAG, "ensureRunning skipped: wireless debugging unsupported")
+                return@execute
+            }
+            if (state == State.READY && service != null) {
+                Log.d(TAG, "ensureRunning skipped: helper already ready")
+                return@execute
+            }
             // Bring-up already in flight: a previous ensureRunning() task is spawning
             // a server and its binder hasn't published yet. Without this guard, every
             // call between the spawn and the READY transition fires another server,
@@ -166,13 +189,9 @@ object PrivilegedService {
                 Log.d(TAG, "ensureRunning ignored — bring-up already in flight (state=$state)")
                 return@execute
             }
-            // Re-evaluate prerequisites on every attempt — the user may have just unlocked
-            // Developer options or toggled Wireless Debugging.
-            if (!isDevOptionsEnabled(ctx)) {
-                setState(State.NEEDS_DEVELOPER_OPTIONS)
-                return@execute
-            }
+            logDeveloperOptions(ctx)
             if (!hasPaired(ctx)) {
+                Log.d(TAG, "ensureRunning blocked: pairing required")
                 setState(State.NEEDS_PAIRING)
                 return@execute
             }

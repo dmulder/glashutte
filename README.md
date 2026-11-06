@@ -64,14 +64,17 @@ Gradle looks for it in this order (first hit wins):
 2. the `VITURE_SDK_DIR` environment variable
 3. `Android/libs/viture-sdk/` (git-ignored)
 
-The directory must have the layout VITURE ships:
+The directory must contain headers and native libraries:
 
 ```
-<sdk>/libs/arm64-v8a/libglasses.so
-<sdk>/libs/arm64-v8a/libcarina_vio.so
-<sdk>/libs/arm64-v8a/libcloud_protocol.so
+<sdk>/android/arm64-v8a/libglasses.so
+<sdk>/android/arm64-v8a/libcarina_vio.so
+<sdk>/android/arm64-v8a/libcloud_protocol.so
 <sdk>/include/viture_*.h
 ```
+
+The native library directory may also be named `libs/` instead of `android/`.
+If both contain `arm64-v8a/libglasses.so`, the build uses `libs/`.
 
 Tested against SDK 2.4.0 on the upstream author's hardware. Extra build requirements when
 the SDK is present: NDK `30.0.14904198` and CMake `4.1.2` (install via the SDK Manager).
@@ -113,6 +116,16 @@ make shell           # interactive shell in the build environment
 make clean           # remove dist/ and the scratch build volume (distclean: also caches + image)
 ```
 
+If Maven Central returns HTTP 429, you can select a Maven Central mirror or your
+organization's repository cache for plugin and app dependencies:
+
+```bash
+make build/apk MAVEN_CENTRAL_URL=https://maven-central.storage-download.googleapis.com/maven2/
+```
+
+Without this variable, the build uses Maven Central directly. For builds outside the
+container, export `MAVEN_CENTRAL_URL` before running Gradle.
+
 - Your source tree is mounted **read-only** (`:Z` relabel for SELinux hosts); the build runs on a
   copy in a named volume, so the working tree is never touched. Gradle and Android caches
   live in the named volume `glashutte-cache`, so repeat builds are fast. Rootless podman uses
@@ -133,6 +146,30 @@ First run on the phone: pair the privileged helper through Wireless Debugging (s
 [`Android/docs/PRIVILEGE.md`](Android/docs/PRIVILEGE.md)), plug in the glasses, accept the
 USB permission dialog. More on usage, hotkeys and troubleshooting in
 [`Android/README.md`](Android/README.md).
+
+### Troubleshooting startup
+
+The `Glashutte/Privileged` log tag records the initial setup state, Developer options
+read results, pairing-marker presence, and reasons helper startup stops. Failed settings
+reads and state listeners include stack traces. `Glashutte/Main` records activity resumes
+and setup scene changes. These messages do not include pairing codes or ADB credentials.
+The Developer options setting is diagnostic only: it can read as disabled inside the app
+even when enabled on the phone. Setup relies on actual ADB pairing and connection results.
+
+After installing a debug build, capture logs in one terminal:
+
+```bash
+adb logcat -v threadtime -T 1 'Glashutte/Privileged:V' 'Glashutte/Main:V' 'AndroidRuntime:E' '*:S' > output
+```
+
+In another terminal, restart the app, then reproduce the problem:
+
+```bash
+adb shell am force-stop io.github.dmulder.glashutte
+adb shell am start -n io.github.dmulder.glashutte/.MainActivity
+```
+
+Stop the capture with Ctrl+C. Glasses are not required to diagnose the setup wizard.
 
 ## Repository layout
 

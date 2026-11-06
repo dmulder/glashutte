@@ -18,10 +18,15 @@ plugins {
 //   3. <repo>/Android/libs/viture-sdk/                   (git-ignored)
 // Pass -Pviture.sdk=off to force the stub even if an SDK is present.
 //
-// Expected layout (as shipped by VITURE):
-//   <sdk>/libs/arm64-v8a/{libglasses.so, libcarina_vio.so, libcloud_protocol.so}
+// Native libraries may be under <sdk>/android/ (vendor layout) or <sdk>/libs/.
 //   <sdk>/include/viture_*.h
 // ---------------------------------------------------------------------------------------
+fun vitureNativeLibsDir(sdkDir: File): File =
+    listOf("libs", "android")
+        .map { File(sdkDir, it) }
+        .firstOrNull { File(it, "arm64-v8a/libglasses.so").isFile }
+        ?: File(sdkDir, "libs")
+
 val vitureSdkDir: File? = run {
     if (providers.gradleProperty("viture.sdk").orNull.equals("off", ignoreCase = true)) {
         return@run null
@@ -40,10 +45,10 @@ val vitureSdkDir: File? = run {
         }
         return@run null
     }
-    val lib = File(dir, "libs/arm64-v8a/libglasses.so")
+    val lib = File(vitureNativeLibsDir(dir), "arm64-v8a/libglasses.so")
     if (!lib.isFile) {
         throw GradleException(
-            "VITURE SDK headers found in $dir but libs/arm64-v8a/libglasses.so is missing. " +
+            "VITURE SDK headers found in $dir but arm64-v8a/libglasses.so is missing from both libs/ and android/. " +
                 "Fix the SDK directory or pass -Pviture.sdk=off to build without it.",
         )
     }
@@ -85,7 +90,7 @@ android {
     sourceSets.getByName("main") {
         kotlin.directories.add(if (hasVitureSdk) "src/sdkPresent/kotlin" else "src/sdkAbsent/kotlin")
         if (hasVitureSdk) {
-            jniLibs.srcDir(File(vitureSdkDir, "libs"))
+            jniLibs.srcDir(vitureNativeLibsDir(vitureSdkDir!!))
         }
     }
 
@@ -96,6 +101,7 @@ android {
                 cmake {
                     cppFlags += "-std=c++17"
                     arguments += "-DVITURE_SDK_DIR=${vitureSdkDir!!.absolutePath}"
+                    arguments += "-DVITURE_JNI_LIBS_DIR=${vitureNativeLibsDir(vitureSdkDir!!).absolutePath}"
                 }
             }
         }

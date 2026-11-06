@@ -212,6 +212,7 @@ class MainActivity : ComponentActivity() {
     private var pendingKeyboardRescan: Runnable? = null
 
     private val privilegeListener: () -> Unit = { runOnUiThread { renderStatus() } }
+    private var lastLoggedSetupScene: Pair<State, Boolean>? = null
 
     /**
      * Result-launcher for POST_NOTIFICATIONS (API 33+). The notification path is the
@@ -668,6 +669,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        Log.d("Glashutte/Main", "onResume: privileged state=${PrivilegedService.state}")
         // Returning from Developer settings or the pairing dialog may have changed things —
         // re-attempt bring-up. Idempotent and no-op once READY.
         PrivilegedService.ensureRunning()
@@ -767,11 +769,19 @@ class MainActivity : ComponentActivity() {
     }
 
     /**
-     * Pick which of the three scenes is visible from [PrivilegedService.state] and whether the
+     * Pick which scene is visible from [PrivilegedService.state] and whether the
      * glasses are connected, and populate the wizard with its current step.
      */
     private fun renderStatus() {
         val glassesShowing = presentation?.isShowing == true
+        val setupScene = PrivilegedService.state to glassesShowing
+        if (setupScene != lastLoggedSetupScene) {
+            Log.d(
+                "Glashutte/Main",
+                "renderStatus: privileged state=${setupScene.first}, glassesShowing=$glassesShowing",
+            )
+            lastLoggedSetupScene = setupScene
+        }
         when {
             PrivilegedService.state != State.READY -> showWizard()
             !glassesShowing -> showScene(showWizard = false, showWaiting = true)
@@ -793,11 +803,6 @@ class MainActivity : ComponentActivity() {
                 R.string.privilege_title_unsupported,
                 R.string.privilege_msg_unsupported,
                 actionLabel = null,
-            )
-            State.NEEDS_DEVELOPER_OPTIONS -> populateWizard(
-                R.string.privilege_title_dev_options,
-                R.string.privilege_msg_dev_options,
-                actionLabel = R.string.privilege_action_open_about,
             )
             State.NEEDS_WIRELESS_DEBUGGING -> populateWizard(
                 R.string.privilege_title_wireless_debugging,
@@ -854,17 +859,9 @@ class MainActivity : ComponentActivity() {
      */
     private fun onSetupAction() {
         when (PrivilegedService.state) {
-            State.NEEDS_DEVELOPER_OPTIONS -> openAboutPhone()
             State.NEEDS_WIRELESS_DEBUGGING, State.NEEDS_PAIRING -> openWirelessDebugging()
             else -> Unit
         }
-    }
-
-    private fun openAboutPhone() {
-        startFirstAvailable(
-            Intent(Settings.ACTION_DEVICE_INFO_SETTINGS),
-            Intent(Settings.ACTION_SETTINGS),
-        )
     }
 
     /**

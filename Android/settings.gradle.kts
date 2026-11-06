@@ -7,7 +7,12 @@ pluginManagement {
                 includeGroupByRegex("androidx.*")
             }
         }
-        mavenCentral()
+        val centralUrl = providers.environmentVariable("MAVEN_CENTRAL_URL").orNull
+        if (centralUrl.isNullOrBlank()) {
+            mavenCentral()
+        } else {
+            maven { url = uri(centralUrl) }
+        }
         gradlePluginPortal()
     }
 }
@@ -16,7 +21,12 @@ dependencyResolutionManagement {
     repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
     repositories {
         google()
-        mavenCentral()
+        val centralUrl = providers.environmentVariable("MAVEN_CENTRAL_URL").orNull
+        if (centralUrl.isNullOrBlank()) {
+            mavenCentral()
+        } else {
+            maven { url = uri(centralUrl) }
+        }
         // libadb-android and sun-security-android — the embedded ADB client (see docs/PRIVILEGE.md).
         maven { url = uri("https://jitpack.io") }
     }
