@@ -1,0 +1,63 @@
+name: Android build
+
+# Builds the Android app WITHOUT the proprietary VITURE SDK (stub glasses backend).
+# The SDK is never present in CI and must never be committed; see README.md.
+on:
+  push:
+    branches: [main]
+    paths: ["Android/**", ".github/workflows/android.yml"]
+  pull_request:
+    paths: ["Android/**", ".github/workflows/android.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: Android
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Refuse committed VITURE SDK files
+        working-directory: .
+        run: |
+          bad=$(git ls-files | grep -E '(^|/)(libglasses|libcarina_vio|libcloud_protocol)[^/]*\.so$|(^|/)viture_[a-z_]+\.h$|(^|/)Viture/|(^|/)libs/viture-sdk/' || true)
+          if [ -n "$bad" ]; then
+            echo "::error::The VITURE SDK must never be committed. Offending files:"
+            echo "$bad"
+            exit 1
+          fi
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Install Android SDK components
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-37.0" "build-tools;36.0.0" > /dev/null
+
+      - name: Unit tests
+        run: ./gradlew --no-daemon :glasses:testDebugUnitTest
+
+      - name: Assemble debug APK (stub backend)
+        run: ./gradlew --no-daemon :app:assembleDebug
+
+      - name: Upload debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: glashutte-debug-no-viture-sdk
+          path: Android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error

@@ -57,7 +57,7 @@ logger.lifecycle(
 
 android {
     namespace = "io.github.dmulder.glashutte.glasses"
-    compileSdk = 36
+    compileSdk = 37
 
     defaultConfig {
         minSdk = 26
