@@ -366,7 +366,11 @@ object GlassesDiagnostics {
         sb.append(appInfo).append('\n')
         sb.append("backend=").append(backendName).append(" sdkBacked=").append(backendSdkBacked).append('\n')
         sb.append("sdk libs packaged in APK: ").append(sdkLibsInApk.ifEmpty { listOf("(none)") }).append("\n\n")
+        sb.append(InputDiagnostics.helperLine()).append('\n')
+        sb.append("INPUT VERDICT: ").append(InputDiagnostics.verdict()).append('\n')
         sb.append("VERDICT: ").append(verdict()).append("\n\n")
+
+        sb.append(InputDiagnostics.report()).append('\n')
 
         sb.append("-- Pipeline stages (first non-OK stage is where it breaks) --\n")
         synchronized(lock) {

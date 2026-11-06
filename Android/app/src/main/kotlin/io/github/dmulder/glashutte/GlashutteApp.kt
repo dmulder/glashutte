@@ -213,12 +213,19 @@ class GlashutteApp : Application() {
                 WorkspaceController.moveCursor(
                     dx / RAW_MOUSE_REF_TICKS,
                     dy / RAW_MOUSE_REF_TICKS,
+                    io.github.dmulder.glashutte.glasses.InputDiagnostics.Path.MOUSE,
                 )
             }
             if (wheel != 0) {
                 // REL_WHEEL ticks: 1 per notch on a notched wheel. Same gain as
                 // the in-activity AXIS_VSCROLL path.
-                WorkspaceController.scroll(wheel * RAW_MOUSE_WHEEL_GAIN)
+                io.github.dmulder.glashutte.glasses.InputDiagnostics.note(
+                    io.github.dmulder.glashutte.glasses.InputDiagnostics.Path.MOUSE, "wheel", "raw=$wheel",
+                )
+                WorkspaceController.scroll(
+                    wheel * RAW_MOUSE_WHEEL_GAIN,
+                    io.github.dmulder.glashutte.glasses.InputDiagnostics.Path.MOUSE,
+                )
             }
         }
 
@@ -358,7 +365,12 @@ class GlashutteApp : Application() {
         }
         val held = android.os.SystemClock.uptimeMillis() - mousePrimaryDownAtMs
         if (held in 0..MOUSE_CLICK_MAX_MS) {
-            WorkspaceController.click()
+            WorkspaceController.click(io.github.dmulder.glashutte.glasses.InputDiagnostics.Path.MOUSE)
+        } else {
+            io.github.dmulder.glashutte.glasses.InputDiagnostics.note(
+                io.github.dmulder.glashutte.glasses.InputDiagnostics.Path.MOUSE, "clickTooLong",
+                "button held ${held}ms (> ${MOUSE_CLICK_MAX_MS}ms): not a click", always = true,
+            )
         }
     }
 

@@ -31,6 +31,9 @@
   `VITURE=off`. APK names tell you which you have: `-with-viture-sdk.apk` vs `-no-viture-sdk.apk`.
 - **No head tracking on a with-SDK build?** Open the **Glashutte Diagnostics** app icon or follow
   [`docs/HEAD-TRACKING-DEBUG.md`](docs/HEAD-TRACKING-DEBUG.md); one run shows which stage fails.
+- **Apps are visible on the glasses but do not react to the phone trackpad, a Bluetooth mouse or a
+  Bluetooth keyboard?** Follow [`docs/INPUT-DEBUG.md`](docs/INPUT-DEBUG.md); it tests each of the
+  three separately and the first line of the log says whether the input helper is connected.
 - **DRM apps via a flat "native handoff" mode (planned).** Apps that render protected
   content cannot be re-rendered into a head-tracked scene, so the plan is to hand the
   glasses' display to such an app natively (flat, no head tracking) and return to the

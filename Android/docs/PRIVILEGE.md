@@ -154,6 +154,15 @@ machine:
 - `CONNECTING` / `STARTING` — progress.
 - `READY` — card hidden, exactly as today.
 
+The setup scene is scrollable and numbered, shows the last failure reason
+(`PrivilegedService.lastFailure`), and has a **Pair here instead** form for when the
+notification route fails: 6-digit code plus the pairing `IP:port` (`AdbDiscovery.parseEndpoint`,
+`PrivilegedService.activate(code, endpoint)`), and a manual *connect* `IP:port`
+(`setManualConnectEndpoint`). No USB cable or computer is needed. A watchdog fails `STARTING`
+after 20 s with the helper's own boot output, and a Binder death recipient drops a dead helper
+back to `NEEDS_WIRELESS_DEBUGGING` instead of leaving a stale READY. Everything lands in the
+Diagnostics app and the `GlashutteDiag` tag; see [`docs/INPUT-DEBUG.md`](../../docs/INPUT-DEBUG.md).
+
 ---
 
 ## Build order

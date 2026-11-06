@@ -38,6 +38,17 @@ object AdbDiscovery {
 
     data class Endpoint(val host: String, val port: Int)
 
+    /** Parse `host:port` as typed from the Wireless debugging screen; null if malformed. */
+    fun parseEndpoint(text: String): Endpoint? {
+        val trimmed = text.trim()
+        val i = trimmed.lastIndexOf(':')
+        if (i <= 0) return null
+        val host = trimmed.substring(0, i).trim().trim('[', ']')
+        val port = trimmed.substring(i + 1).trim().toIntOrNull() ?: return null
+        if (host.isEmpty() || port !in 1..65535) return null
+        return Endpoint(host, port)
+    }
+
     /** Discover the pairing service; returns null if nothing showed up before [timeoutMs]. */
     fun discoverPairing(context: Context, timeoutMs: Long): Endpoint? =
         discoverAll(context, PAIRING_SERVICE, timeoutMs).firstOrNull()

@@ -143,6 +143,12 @@ without it still load). It feeds logcat tag `GlashutteDiag`, the *Glashutte Diag
 activity (live report, log export, experiments) and a banner on the glasses. Procedure:
 [`HEAD-TRACKING-DEBUG.md`](HEAD-TRACKING-DEBUG.md).
 
+`InputDiagnostics` (same module) does the same for input. It models three paths separately
+(phone-as-trackpad, Bluetooth mouse, Bluetooth keyboard), each as a chain of stages whose first
+stage is always "input helper connected". The report is the first section of the `GlashutteDiag`
+log and the Diagnostics app has per-path Test and Share buttons. Procedure:
+[`INPUT-DEBUG.md`](INPUT-DEBUG.md).
+
 Findings from tracing the path against upstream (code reading, not hardware):
 
 - The refactor did not change the SDK call order (`create` -> Carina DoF type -> state callback

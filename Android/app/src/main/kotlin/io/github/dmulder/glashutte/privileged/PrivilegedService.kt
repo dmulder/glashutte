@@ -9,6 +9,9 @@ import android.provider.Settings
 import android.util.Log
 import android.view.KeyEvent
 import android.view.Surface
+import io.github.dmulder.glashutte.glasses.InjectOutcome
+import io.github.dmulder.glashutte.glasses.InputDiagnostics
+import io.github.dmulder.glashutte.glasses.InputExperiments
 import io.github.muntashirakon.adb.AdbPairingRequiredException
 import io.github.muntashirakon.adb.AdbStream
 import java.io.File
@@ -67,6 +70,26 @@ object PrivilegedService {
     var state: State = State.NEEDS_PAIRING
         private set
 
+    /**
+     * Why the last bring-up attempt did not reach [State.READY] (empty while it has not
+     * failed). Shown in the wizard and mirrored into the diagnostics log.
+     */
+    @Volatile
+    var lastFailure: String = ""
+        private set
+
+    /**
+     * Endpoint typed in by the user when mDNS discovery cannot find the connect service
+     * (some networks block multicast). Used in place of discovery results when set.
+     */
+    @Volatile
+    private var manualConnect: AdbDiscovery.Endpoint? = null
+
+    fun setManualConnectEndpoint(host: String, port: Int) {
+        manualConnect = AdbDiscovery.Endpoint(host, port)
+        InputDiagnostics.timelineEvent("manual connect endpoint set: $host:$port")
+    }
+
     @Volatile
     private var service: IPrivilegedService? = null
 
@@ -92,6 +115,10 @@ object PrivilegedService {
         logDeveloperOptions(context)
         state = computeInitialState(context)
         Log.d(TAG, "init: state=$state")
+        InputDiagnostics.helperState(
+            state.name, false,
+            if (state == State.NEEDS_PAIRING) "never paired on this device" else "not connected yet",
+        )
         notifyListeners()
     }
 
@@ -141,12 +168,42 @@ object PrivilegedService {
         }
     }
 
-    private fun setState(next: State) {
-        if (next == state) return
+    private fun setState(next: State, failure: String? = null) {
+        if (failure != null) {
+            lastFailure = failure
+            Log.w(TAG, "bring-up: $failure")
+        } else if (next == State.READY) {
+            lastFailure = ""
+        }
+        if (next == state) {
+            InputDiagnostics.helperState(next.name, next == State.READY, lastFailure)
+            if (failure != null) notifyListeners()
+            return
+        }
         Log.i(TAG, "state: $state -> $next")
         state = next
+        InputDiagnostics.helperState(next.name, next == State.READY, if (next == State.READY) "" else lastFailure)
+        if (next == State.STARTING) armStartWatchdog()
         notifyListeners()
     }
+
+    private fun armStartWatchdog() {
+        scheduler.schedule({
+            if (state == State.STARTING) {
+                try { adbStream?.close() } catch (_: Exception) {}
+                adbStream = null
+                setState(
+                    State.NEEDS_WIRELESS_DEBUGGING,
+                    "the helper process was started but never reported back within ${START_TIMEOUT_MS / 1000}s " +
+                        "(its output: ${bootOutput.ifEmpty { "none" }})",
+                )
+            }
+        }, START_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+    }
+
+    /** First lines the helper printed on its shell stream while starting, for the failure message. */
+    @Volatile
+    private var bootOutput: String = ""
 
     private fun notifyListeners() {
         listeners.forEach { listener ->
@@ -197,10 +254,16 @@ object PrivilegedService {
             }
 
             setState(State.DISCOVERING)
-            val endpoints = AdbDiscovery.discoverConnect(ctx, DISCOVERY_TIMEOUT_MS)
+            val discovered = AdbDiscovery.discoverConnect(ctx, DISCOVERY_TIMEOUT_MS)
+            val endpoints = discovered.ifEmpty { listOfNotNull(manualConnect) }
+            InputDiagnostics.timelineEvent(
+                "connect endpoints: ${if (endpoints.isEmpty()) "none (mDNS found nothing, no manual endpoint)" else endpoints.joinToString { "${it.host}:${it.port}" }}",
+            )
             if (endpoints.isEmpty()) {
-                Log.w(TAG, "connect service not advertised — wireless debugging off?")
-                setState(State.NEEDS_WIRELESS_DEBUGGING)
+                setState(
+                    State.NEEDS_WIRELESS_DEBUGGING,
+                    "Wireless debugging is not advertising a connect port (turn it on, and make sure the phone is on Wi-Fi)",
+                )
                 return@execute
             }
 
@@ -224,7 +287,7 @@ object PrivilegedService {
                         // the user back through pairing. No point trying other endpoints.
                         Log.w(TAG, "device requires (re-)pairing — invalidating the paired marker")
                         markPaired(ctx, false)
-                        setState(State.NEEDS_PAIRING)
+                        setState(State.NEEDS_PAIRING, "the phone no longer trusts this app's key: pair again")
                         return@execute
                     } catch (e: Exception) {
                         lastError = e
@@ -240,19 +303,24 @@ object PrivilegedService {
                         "all ${endpoints.size} connect endpoint(s) refused — wireless debugging off?",
                         lastError,
                     )
-                    setState(State.NEEDS_WIRELESS_DEBUGGING)
+                    setState(
+                        State.NEEDS_WIRELESS_DEBUGGING,
+                        "could not connect to ${endpoints.joinToString { "${it.host}:${it.port}" }}: " +
+                            "${lastError?.javaClass?.simpleName ?: "refused"} ${lastError?.message.orEmpty()}".trim(),
+                    )
                     return@execute
                 }
             }
 
             setState(State.STARTING)
+            bootOutput = ""
             val stream = ServerBootstrap.start(ctx, adb)
             if (stream == null) {
-                Log.w(TAG, "could not start PrivilegedServer over ADB")
-                setState(State.NEEDS_WIRELESS_DEBUGGING)
+                setState(State.NEEDS_WIRELESS_DEBUGGING, "could not open the ADB shell stream to start the helper")
                 return@execute
             }
             adbStream = stream
+            captureBootOutput(stream)
             // BinderReceiverProvider.onPrivilegedBinder() drives us to READY when the server
             // publishes its Binder back to the app.
         }
@@ -265,26 +333,48 @@ object PrivilegedService {
      * from a notification's `RemoteInput` (the shade overlays the dialog instead of
      * backgrounding it). [done] runs on the worker thread.
      */
-    fun activate(pairingCode: String, done: (Boolean) -> Unit) {
+    fun activate(pairingCode: String, done: (Boolean) -> Unit) = activate(pairingCode, null, done)
+
+    /**
+     * As [activate], but with the pairing endpoint typed in by the user (the "IP address &
+     * port" line of the pairing dialog) instead of found over mDNS. Needed on networks that
+     * block multicast, which is also why the notification route can fail.
+     */
+    fun activate(pairingCode: String, manualEndpoint: AdbDiscovery.Endpoint?, done: (Boolean) -> Unit) {
         worker.execute {
             val ctx = appContext ?: run { done(false); return@execute }
             try {
-                val endpoint = AdbDiscovery.discoverPairing(ctx, DISCOVERY_TIMEOUT_MS)
+                InputDiagnostics.timelineEvent(
+                    "pairing requested (${if (manualEndpoint != null) "manual ${manualEndpoint.host}:${manualEndpoint.port}" else "mDNS"})",
+                )
+                val endpoint = manualEndpoint ?: AdbDiscovery.discoverPairing(ctx, DISCOVERY_TIMEOUT_MS)
                 if (endpoint == null) {
-                    Log.w(TAG, "pair: mDNS did not find the service — is the dialog still up?")
                     markPaired(ctx, false)
+                    lastFailure = "pairing: the pairing dialog was not found on the network (is it still open? " +
+                        "otherwise type its IP address and port in manually)"
+                    InputDiagnostics.helperState(state.name, false, lastFailure)
+                    notifyListeners()
                     done(false); return@execute
                 }
                 val adb = AdbConnectionManager.getInstance(ctx)
                 val paired = adb.pair(endpoint.host, endpoint.port, pairingCode)
                 Log.i(TAG, "ADB pair ${endpoint.host}:${endpoint.port} ok=$paired")
+                InputDiagnostics.timelineEvent("pairing ${endpoint.host}:${endpoint.port} -> ${if (paired) "OK" else "REJECTED (wrong code or dialog closed)"}")
                 markPaired(ctx, paired)
-                if (!paired) { done(false); return@execute }
+                if (!paired) {
+                    lastFailure = "pairing was rejected: check the 6-digit code and that the dialog is still open"
+                    InputDiagnostics.helperState(state.name, false, lastFailure)
+                    notifyListeners()
+                    done(false); return@execute
+                }
                 done(true)
                 ensureRunning()
             } catch (e: Exception) {
                 Log.e(TAG, "activate failed", e)
                 markPaired(ctx, false)
+                lastFailure = "pairing failed: ${e.javaClass.simpleName} ${e.message.orEmpty()}".trim()
+                InputDiagnostics.helperState(state.name, false, lastFailure)
+                notifyListeners()
                 done(false)
             }
         }
@@ -312,12 +402,94 @@ object PrivilegedService {
         }
         service = IPrivilegedService.Stub.asInterface(binder)
         Log.i(TAG, "privileged binder bound — READY")
+        runCatching { binder.linkToDeath({ onHelperDied() }, 0) }
+            .onFailure { Log.w(TAG, "linkToDeath failed", it) }
+        pushInputConfig()
+        refreshHelperReport()
         // Only install the hotkey listener if a keyboard is actually attached. With
         // no keyboard the helper opens no /dev/input/event* nodes at all — minimum
         // footprint, no contention against the glasses' USB IMU endpoint on OEMs
         // (Samsung) where BT input attach disturbs USB hosts.
         if (hotkeyMonitoringRequested) installHotkeyListener()
         setState(State.READY)
+    }
+
+    private fun onHelperDied() {
+        if (service == null) return
+        service = null
+        try { adbStream?.close() } catch (_: Exception) {}
+        adbStream = null
+        InputDiagnostics.helperDied("binder death")
+        setState(State.NEEDS_WIRELESS_DEBUGGING, "the helper process died (killed by the system, or Wireless Debugging was switched off)")
+        ensureRunning()
+    }
+
+    private fun captureBootOutput(stream: io.github.muntashirakon.adb.AdbStream) {
+        Thread({
+            try {
+                val reader = stream.openInputStream().bufferedReader()
+                val sb = StringBuilder()
+                var lines = 0
+                while (lines < BOOT_OUTPUT_LINES) {
+                    val line = reader.readLine() ?: break
+                    lines++
+                    sb.append(line.take(160)).append(" | ")
+                    bootOutput = sb.toString()
+                    InputDiagnostics.timelineEvent("helper stdout: ${line.take(160)}")
+                }
+            } catch (_: Exception) {
+                // Stream closed — normal on teardown.
+            }
+        }, "glashutte-boot-output").apply { isDaemon = true }.start()
+    }
+
+    /** Send the diagnostics-screen input switches to the helper. */
+    fun pushInputConfig() {
+        val ctx = appContext ?: return
+        val helper = service ?: return
+        val strategy = InputExperiments.strategy(ctx)
+        val wait = InputExperiments.waitForResult(ctx)
+        val ownFocus = InputExperiments.ownFocusFlag(ctx)
+        worker.execute {
+            runCatching { helper.setInputConfig(strategy.wire, wait, ownFocus) }
+                .onFailure { Log.w(TAG, "setInputConfig failed", it) }
+        }
+    }
+
+    /**
+     * Ask the helper to describe itself (its routes into InputManager, the raw-input monitor's
+     * counters, recent injections) and feed the answer to the diagnostics. Safe to call often;
+     * [done] runs on the worker thread.
+     */
+    fun refreshHelperReport(done: (() -> Unit)? = null) {
+        val helper = service
+        if (helper == null) {
+            InputDiagnostics.helperPing(false)
+            InputDiagnostics.helperReport("(no helper connected: state=$state)")
+            done?.invoke()
+            return
+        }
+        worker.execute {
+            val alive = helper.asBinder().pingBinder()
+            InputDiagnostics.helperPing(alive)
+            val report = runCatching { helper.probe() }
+                .getOrElse { "probe failed: ${it.javaClass.simpleName}: ${it.message}" }
+            InputDiagnostics.helperReport(report)
+            val routeOk = report.contains("route=ok")
+            InputDiagnostics.injector(
+                routeOk,
+                report.lineSequence().firstOrNull { it.startsWith("injector:") } ?: "no injector line in the helper's report",
+            )
+            report.lineSequence().firstOrNull { it.startsWith("uid=") }?.let { InputDiagnostics.helperInfo(it) }
+            done?.invoke()
+        }
+    }
+
+    /** `dumpsys` excerpts for one display (windows, focus, activities), or a reason it is unavailable. */
+    fun describeDisplay(displayId: Int): String {
+        val helper = service ?: return "(no helper connected: state=$state)"
+        return runCatching { helper.describeDisplay(displayId) }
+            .getOrElse { "describeDisplay failed: ${it.javaClass.simpleName}: ${it.message}" }
     }
 
     /**
@@ -340,12 +512,14 @@ object PrivilegedService {
         }
         override fun onMouseDelta(dx: Int, dy: Int, wheel: Int) {
             // Raw evdev mouse deltas — never quantised to the phone-screen edge.
+            InputDiagnostics.note(InputDiagnostics.Path.MOUSE, "evdevDelta", "dx=$dx dy=$dy wheel=$wheel")
             mainHandler.post { mouseDeltaHandler?.invoke(dx, dy, wheel) }
         }
         override fun onMouseButton(code: Int, pressed: Boolean) {
             // With the helper holding EVIOCGRAB on the mouse, button events never
             // reach `dispatchGenericMotionEvent` either — so we have to forward
             // them here and the app dispatches workspace clicks ourselves.
+            InputDiagnostics.note(InputDiagnostics.Path.MOUSE, "evdevButton", "code=$code pressed=$pressed", always = true)
             mainHandler.post { mouseButtonHandler?.invoke(code, pressed) }
         }
     }
@@ -472,8 +646,23 @@ object PrivilegedService {
      * shell-uid helper so the event reaches an out-of-process VirtualDisplay; one
      * AIDL call per frame, no swipe synthesis.
      */
-    fun scrollOnDisplay(displayId: Int, x: Int, y: Int, vScroll: Float) =
-        onWorker { service?.injectScroll(displayId, x, y, vScroll) }
+    fun scrollOnDisplay(displayId: Int, x: Int, y: Int, vScroll: Float) {
+        val helper = service
+        onWorker {
+            val outcome = if (helper == null) noHelper() else callOutcome { helper.injectScrollEx(displayId, x, y, vScroll) }
+            InputDiagnostics.recordInject("scroll", "display=$displayId ($x,$y) v=%.2f".format(vScroll), outcome)
+        }
+    }
+
+    private fun noHelper(): InjectOutcome =
+        InjectOutcome(InjectOutcome.NO_HELPER, "", "state=$state${if (lastFailure.isEmpty()) "" else " — $lastFailure"}")
+
+    private inline fun callOutcome(block: () -> String?): InjectOutcome =
+        try {
+            InjectOutcome.parse(block())
+        } catch (t: Throwable) {
+            InjectOutcome(InjectOutcome.HELPER_CALL_FAILED, "", "${t.javaClass.simpleName}: ${t.message}")
+        }
 
     /**
      * Streamed touch injection: one frame at a time, action ∈ {DOWN=0, MOVE=1, UP=2,
@@ -485,12 +674,43 @@ object PrivilegedService {
             0 -> "DOWN"; 1 -> "MOVE"; 2 -> "UP"; 3 -> "CANCEL"; else -> "?($action)"
         }
         Log.d(TAG, "injectTouch $name @ ($x,$y) display=$displayId")
-        onWorker { service?.injectTouch(displayId, x, y, action) }
+        val helper = service
+        onWorker {
+            val outcome = if (helper == null) noHelper() else callOutcome { helper.injectTouchEx(displayId, x, y, action) }
+            if (name != "MOVE" || !outcome.ok) {
+                InputDiagnostics.recordInject("touch", "$name display=$displayId ($x,$y)", outcome)
+            }
+        }
     }
 
-    fun key(displayId: Int, keyCode: Int) = onWorker { service?.key(displayId, keyCode) }
+    fun key(displayId: Int, keyCode: Int) {
+        val helper = service
+        onWorker {
+            val outcome = if (helper == null) noHelper() else callOutcome { helper.keyEx(displayId, keyCode) }
+            InputDiagnostics.recordInject("key", "${KeyEvent.keyCodeToString(keyCode)} display=$displayId", outcome)
+        }
+    }
 
-    fun text(displayId: Int, value: String) = onWorker { service?.text(displayId, value) }
+    /** One physical-keyboard key transition ([action] is KeyEvent.ACTION_DOWN / ACTION_UP). */
+    fun injectKey(displayId: Int, keyCode: Int, action: Int, metaState: Int) {
+        val helper = service
+        onWorker {
+            val outcome = if (helper == null) noHelper() else callOutcome { helper.injectKeyEx(displayId, keyCode, action, metaState) }
+            InputDiagnostics.recordInject(
+                "key",
+                "${KeyEvent.keyCodeToString(keyCode)} ${if (action == KeyEvent.ACTION_DOWN) "down" else "up"} meta=0x${Integer.toHexString(metaState)} display=$displayId",
+                outcome,
+            )
+        }
+    }
+
+    fun text(displayId: Int, value: String) {
+        val helper = service
+        onWorker {
+            val outcome = if (helper == null) noHelper() else callOutcome { helper.textEx(displayId, value) }
+            InputDiagnostics.recordInject("text", "${value.length} chars display=$displayId", outcome)
+        }
+    }
 
     fun forceStop(packageName: String) = onWorker { service?.forceStop(packageName) }
 
@@ -527,6 +747,12 @@ object PrivilegedService {
 
     /** How long to wait for an mDNS hit before giving up. */
     private const val DISCOVERY_TIMEOUT_MS = 5_000L
+
+    /** How long to wait for the started helper to hand its binder back before declaring failure. */
+    private const val START_TIMEOUT_MS = 20_000L
+
+    /** How many lines of the helper's shell output to keep for the failure message. */
+    private const val BOOT_OUTPUT_LINES = 12
 
     /** How long to wait after a Back press before checking whether it closed the app. */
     private const val BACK_SETTLE_MS = 800L
