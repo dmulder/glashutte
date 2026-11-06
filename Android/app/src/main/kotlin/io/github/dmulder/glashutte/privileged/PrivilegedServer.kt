@@ -645,6 +645,187 @@ class PrivilegedServer() : IPrivilegedService.Stub() {
         "describeDisplay failed: ${t.javaClass.simpleName}: ${t.message}"
     }
 
+    // region Native handoff + DRM / secure-display probe
+
+    /** Size and density overrides a physical display had before [handoffPrepare], for [handoffRestore]. */
+    private class DisplayBackup(val sizeOverride: String?, val densityOverride: String?, val changedSize: Boolean, val changedDensity: Boolean)
+
+    private val displayBackups = ConcurrentHashMap<Int, DisplayBackup>()
+
+    override fun probeSecureDisplay(): String = try {
+        val sb = StringBuilder()
+        val ctx = baseContext()
+        sb.append("helper uid=").append(Process.myUid()).append(" sdk=").append(Build.VERSION.SDK_INT)
+            .append(" build=").append(Build.ID).append('\n')
+        sb.append("permissions held by the helper process:\n")
+        for (perm in listOf(
+            "android.permission.CAPTURE_SECURE_VIDEO_OUTPUT",
+            "android.permission.CAPTURE_VIDEO_OUTPUT",
+            "android.permission.ADD_TRUSTED_DISPLAY",
+            "android.permission.ADD_ALWAYS_UNLOCKED_DISPLAY",
+            "android.permission.MANAGE_ACTIVITY_TASKS",
+            "android.permission.INJECT_EVENTS",
+            "android.permission.WRITE_SECURE_SETTINGS",
+            "android.permission.DUMP",
+        )) {
+            val granted = ctx?.checkPermission(perm, Process.myPid(), Process.myUid())
+            sb.append("  ").append(perm.substringAfterLast('.')).append(": ")
+                .append(if (granted == android.content.pm.PackageManager.PERMISSION_GRANTED) "GRANTED" else "denied").append('\n')
+        }
+        sb.append("virtual-display creation (each is created, then released at once):\n")
+        val flagsPublic = DisplayManager.VIRTUAL_DISPLAY_FLAG_PUBLIC or DisplayManager.VIRTUAL_DISPLAY_FLAG_OWN_CONTENT_ONLY
+        sb.append("  non-secure: ").append(tryCreateDisplay(flagsPublic)).append('\n')
+        sb.append("  trusted (what the workspace uses): ").append(tryCreateDisplay(flagsPublic or VIRTUAL_DISPLAY_FLAG_TRUSTED)).append('\n')
+        sb.append("  secure (VIRTUAL_DISPLAY_FLAG_SECURE): ").append(tryCreateDisplay(flagsPublic or DisplayManager.VIRTUAL_DISPLAY_FLAG_SECURE)).append('\n')
+        sb.append("  trusted + secure: ")
+            .append(tryCreateDisplay(flagsPublic or VIRTUAL_DISPLAY_FLAG_TRUSTED or DisplayManager.VIRTUAL_DISPLAY_FLAG_SECURE)).append('\n')
+
+        sb.append("\n-- features (xr / desktop / freeform / pc) --\n")
+        sb.append(grepLines(runCapture("pm", "list", "features"), Regex("(?i)xr|desktop|freeform|type\\.pc|multi_window|picture_in_picture"), 30)).append('\n')
+        sb.append("\n-- system properties (xr / desktop / drm / hdcp) --\n")
+        sb.append(grepLines(runCapture("getprop"), Regex("(?i)xr|desktop|hdcp|widevine|drm\\.|wvdrm|secure|freeform"), 40)).append('\n')
+        sb.append("\n-- global settings relevant to desktop / secure windows --\n")
+        for (key in listOf(
+            "override_desktop_experience_features", "force_desktop_mode_on_external_displays",
+            "enable_non_resizable_multi_window", "force_resizable_activities", "enable_freeform_support",
+            "disable_secure_windows",
+        )) {
+            sb.append("  ").append(key).append('=').append(runCapture("settings", "get", "global", key)?.trim().orEmpty().ifEmpty { "(unreadable)" }).append('\n')
+        }
+        sb.append("\n-- dumpsys display: flags, HDCP, secure --\n")
+        sb.append(grepLines(runCapture("dumpsys", "display"),
+            Regex("(?i)FLAG_SECURE|FLAG_SUPPORTS_PROTECTED|hdcp|mFlags|DisplayDeviceInfo\\{|isSecure|secure|mirror|mPrimaryDisplayDevice|type=EXTERNAL|desktop"), 60)).append('\n')
+        sb.append("\n-- dumpsys SurfaceFlinger: HDCP / secure / protected --\n")
+        sb.append(grepLines(runCapture("dumpsys", "SurfaceFlinger"), Regex("(?i)hdcp|secure|protected"), 40)).append('\n')
+        remember("probeSecureDisplay ran")
+        sb.toString()
+    } catch (t: Throwable) {
+        "probeSecureDisplay failed: ${t.javaClass.simpleName}: ${t.message}"
+    }
+
+    private fun tryCreateDisplay(flags: Int): String {
+        val dm = displayManager() ?: return "no DisplayManager"
+        var reader: android.media.ImageReader? = null
+        return try {
+            reader = android.media.ImageReader.newInstance(64, 64, android.graphics.PixelFormat.RGBA_8888, 2)
+            val vd = dm.createVirtualDisplay("glashutte-probe", 64, 64, 160, reader.surface, flags)
+            if (vd == null) {
+                "REFUSED (null display)"
+            } else {
+                val state = "ALLOWED (id=${vd.display.displayId} flags=0x${Integer.toHexString(vd.display.flags)})"
+                runCatching { vd.release() }
+                state
+            }
+        } catch (e: Throwable) {
+            "REFUSED (${e.javaClass.simpleName}: ${e.message?.take(140)})"
+        } finally {
+            runCatching { reader?.close() }
+        }
+    }
+
+    private fun grepLines(text: String?, regex: Regex, max: Int): String {
+        if (text.isNullOrBlank()) return "  (no output)"
+        val hits = text.lineSequence().filter { regex.containsMatchIn(it) }.map { "  " + it.trim() }.distinct().take(max).toList()
+        return if (hits.isEmpty()) "  (no matching lines)" else hits.joinToString("\n")
+    }
+
+    private fun parseWm(output: String?): Pair<String?, String?> {
+        // "Physical size: 1920x1200" / "Override size: 1920x1200"; same for density.
+        val physical = output?.lineSequence()?.firstOrNull { it.startsWith("Physical") }?.substringAfter(':')?.trim()
+        val override = output?.lineSequence()?.firstOrNull { it.startsWith("Override") }?.substringAfter(':')?.trim()
+        return physical to override
+    }
+
+    override fun handoffPrepare(displayId: Int, densityDpi: Int, forcePanelSize: Boolean): String = try {
+        val sb = StringBuilder()
+        val sizeOut = runCapture("wm", "size", "-d", displayId.toString())
+        val densityOut = runCapture("wm", "density", "-d", displayId.toString())
+        val (physSize, ovrSize) = parseWm(sizeOut)
+        val (physDensity, ovrDensity) = parseWm(densityOut)
+        sb.append("before: size physical=").append(physSize).append(" override=").append(ovrSize)
+            .append("; density physical=").append(physDensity).append(" override=").append(ovrDensity).append('\n')
+        var changedSize = false
+        var changedDensity = false
+        val effective = (ovrSize ?: physSize)?.split('x')?.mapNotNull { it.trim().toIntOrNull() }
+        val w = effective?.getOrNull(0) ?: 0
+        val h = effective?.getOrNull(1) ?: 0
+        val sixteenTen = h > 0 && kotlin.math.abs(w.toFloat() / h - 1.6f) <= 0.032f
+        if (forcePanelSize && !sixteenTen) {
+            val r = runCapture("wm", "size", "1920x1200", "-d", displayId.toString())
+            changedSize = true
+            sb.append("display reported ${w}x$h (not 16:10): set 1920x1200 -> ").append(r?.trim().orEmpty().ifEmpty { "ok" }).append('\n')
+        } else {
+            sb.append("size left alone (${w}x$h, 16:10=$sixteenTen, forcePanelSize=$forcePanelSize)\n")
+        }
+        val currentDensity = (ovrDensity ?: physDensity)?.trim()?.toIntOrNull()
+        if (currentDensity != densityDpi) {
+            val r = runCapture("wm", "density", densityDpi.toString(), "-d", displayId.toString())
+            changedDensity = true
+            sb.append("density $currentDensity -> $densityDpi: ").append(r?.trim().orEmpty().ifEmpty { "ok" }).append('\n')
+        } else {
+            sb.append("density already $densityDpi\n")
+        }
+        if (changedSize || changedDensity) {
+            displayBackups.putIfAbsent(displayId, DisplayBackup(ovrSize, ovrDensity, changedSize, changedDensity))
+        }
+        remember("handoffPrepare display=$displayId density=$densityDpi -> size=$changedSize density=$changedDensity")
+        sb.toString()
+    } catch (t: Throwable) {
+        "handoffPrepare failed: ${t.javaClass.simpleName}: ${t.message}"
+    }
+
+    override fun handoffLaunch(displayId: Int, packageName: String, activityName: String): String = try {
+        val outcome = runOutcome(
+            "am-start-display",
+            "am", "start", "--display", displayId.toString(), "--windowingMode", "1",
+            "-n", "$packageName/$activityName", "-a", "android.intent.action.MAIN",
+            "-c", "android.intent.category.LAUNCHER", "-f", FLAG_NEW_TASK_MULTIPLE,
+        )
+        remember("handoffLaunch $packageName display=$displayId -> $outcome")
+        Log.i("Glashutte/Launch", "native handoff am-start pkg=$packageName display=$displayId -> $outcome")
+        outcome.encode()
+    } catch (t: Throwable) {
+        InjectOutcome(InjectOutcome.EXCEPTION, "am-start-display", "${t.javaClass.simpleName}: ${t.message}").encode()
+    }
+
+    override fun handoffRestore(displayId: Int): String = try {
+        val backup = displayBackups.remove(displayId)
+        if (backup == null) {
+            "nothing to restore for display $displayId"
+        } else {
+            val sb = StringBuilder()
+            if (backup.changedSize) {
+                val r = if (backup.sizeOverride == null) runCapture("wm", "size", "reset", "-d", displayId.toString())
+                else runCapture("wm", "size", backup.sizeOverride, "-d", displayId.toString())
+                sb.append("size restored (").append(backup.sizeOverride ?: "reset").append("): ").append(r?.trim().orEmpty().ifEmpty { "ok" }).append('\n')
+            }
+            if (backup.changedDensity) {
+                val r = if (backup.densityOverride == null) runCapture("wm", "density", "reset", "-d", displayId.toString())
+                else runCapture("wm", "density", backup.densityOverride, "-d", displayId.toString())
+                sb.append("density restored (").append(backup.densityOverride ?: "reset").append("): ").append(r?.trim().orEmpty().ifEmpty { "ok" }).append('\n')
+            }
+            remember("handoffRestore display=$displayId")
+            sb.toString().trim()
+        }
+    } catch (t: Throwable) {
+        "handoffRestore failed: ${t.javaClass.simpleName}: ${t.message}"
+    }
+
+    override fun displayFacts(displayId: Int): String = try {
+        val sb = StringBuilder()
+        sb.append("wm size -d $displayId: ").append(runCapture("wm", "size", "-d", displayId.toString())?.trim()?.replace('\n', ';')).append('\n')
+        sb.append("wm density -d $displayId: ").append(runCapture("wm", "density", "-d", displayId.toString())?.trim()?.replace('\n', ';')).append('\n')
+        val activities = runCapture("dumpsys", "activity", "activities")
+        sb.append("activities on display $displayId:\n").append(DumpsysFilter.forDisplay(activities, displayId, 40)).append('\n')
+        sb.append("dumpsys display (display $displayId):\n").append(DumpsysFilter.forDisplay(runCapture("dumpsys", "display"), displayId, 25)).append('\n')
+        sb.append("SurfaceFlinger hdcp/secure:\n").append(grepLines(runCapture("dumpsys", "SurfaceFlinger"), Regex("(?i)hdcp|secure"), 12))
+        sb.toString()
+    } catch (t: Throwable) {
+        "displayFacts failed: ${t.javaClass.simpleName}: ${t.message}"
+    }
+
+    // endregion
+
     /**
      * Whether [displayId] currently has an activity on it. Used after a Back press to tell
      * whether Back closed the app (so Glashutte can close the now-empty window). Errs on the
@@ -1074,6 +1255,7 @@ class PrivilegedServer() : IPrivilegedService.Stub() {
                         KEY_X -> PrivilegedHotkeys.HK_TOGGLE_VIEW_MODE
                         KEY_R -> PrivilegedHotkeys.HK_SDK_RECENTER
                         KEY_C -> PrivilegedHotkeys.HK_ANCHOR_POSE
+                        KEY_H -> PrivilegedHotkeys.HK_RETURN_TO_WORKSPACE
                         KEY_EQUAL, KEY_KPPLUS -> PrivilegedHotkeys.HK_ZOOM_IN
                         KEY_MINUS, KEY_KPMINUS -> PrivilegedHotkeys.HK_ZOOM_OUT
                         else -> return
@@ -1143,6 +1325,7 @@ class PrivilegedServer() : IPrivilegedService.Stub() {
             private const val KEY_Z = 44
             private const val KEY_X = 45
             private const val KEY_C = 46
+            private const val KEY_H = 35
             private const val KEY_LEFTALT = 56
             private const val KEY_KPMINUS = 74
             private const val KEY_KPPLUS = 78

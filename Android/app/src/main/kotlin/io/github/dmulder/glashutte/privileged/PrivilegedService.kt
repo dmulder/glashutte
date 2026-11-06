@@ -718,6 +718,38 @@ object PrivilegedService {
     fun displayHasActivity(displayId: Int): Boolean =
         runCatching { service?.displayHasActivity(displayId) == true }.getOrDefault(false)
 
+    // region Native handoff + DRM probe (blocking calls: run them off the main thread)
+
+    private inline fun helperText(none: String, block: (IPrivilegedService) -> String?): String {
+        val helper = service ?: return none
+        return try {
+            block(helper) ?: "(empty reply)"
+        } catch (t: Throwable) {
+            "helper call failed: ${t.javaClass.simpleName}: ${t.message}"
+        }
+    }
+
+    fun probeSecureDisplay(): String =
+        helperText("helper not connected (state=$state)") { it.probeSecureDisplay() }
+
+    fun handoffPrepare(displayId: Int, densityDpi: Int, forcePanelSize: Boolean): String =
+        helperText("helper not connected (state=$state)") { it.handoffPrepare(displayId, densityDpi, forcePanelSize) }
+
+    fun handoffLaunch(displayId: Int, packageName: String, activityName: String): InjectOutcome {
+        val helper = service ?: return noHelper()
+        return callOutcome { helper.handoffLaunch(displayId, packageName, activityName) }
+    }
+
+    fun handoffRestore(displayId: Int): String =
+        helperText("helper not connected (state=$state)") { it.handoffRestore(displayId) }
+
+    fun displayFacts(displayId: Int): String =
+        helperText("helper not connected (state=$state)") { it.displayFacts(displayId) }
+
+    val isHelperReady: Boolean get() = service != null
+
+    // endregion
+
     /**
      * Injects KEYCODE_MEDIA_PAUSE at the given display so any media playback on
      * the activity (YouTube audio, etc.) stops when the window is minimised.
