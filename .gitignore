@@ -10,3 +10,9 @@
 /history.db-shm
 /history.db-wal
 f02aa61-build/
+
+# Android: the VITURE SDK is supplied locally and never committed.
+/Android/libs/viture-sdk/
+
+# Container build output
+/dist/

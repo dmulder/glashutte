@@ -5,7 +5,7 @@ How app windows behave in the workspace — what exists today, and the plan for 
 
 ## Current state
 
-A launched app is an [`AppWindow`](../spatial/src/main/kotlin/com/uxspace/spatial/AppWindow.kt):
+A launched app is an [`AppWindow`](../spatial/src/main/kotlin/io/github/dmulder/glashutte/spatial/AppWindow.kt):
 a fixed-resolution content surface (`VirtualScreen`, 1600×900) framed by window chrome
 (`UiScreen` — a light-grey border and a title bar). `WorkspaceRenderer` holds up to three
 windows in a back-to-front list and draws them in order.
@@ -49,9 +49,9 @@ fills it properly, with no letterboxing and no relaunch.
   together from the taskbar.
 - Dragging the **shared border** between two snapped windows resizes both at once.
 
-### What UxSpace adopts
+### What Glashutte adopts
 
-UxSpace's "screen" is the desktop area — the render band above the taskbar. Snapping tiles
+Glashutte's "screen" is the desktop area — the render band above the taskbar. Snapping tiles
 windows into zones of *that* rectangle. Because at most three windows are open, the useful
 zone sets are halves, quarters, and thirds.
 
@@ -87,7 +87,7 @@ zone sets are halves, quarters, and thirds.
    resized back). This mirrors Windows pulling a snapped window loose.
 
 5. **Snap from the title bar (optional, later).** A long-press of the Maximize button — or
-   a small layouts popup next to it — offers the zone set directly, the UxSpace analogue of
+   a small layouts popup next to it — offers the zone set directly, the Glashutte analogue of
    Snap Layouts. Skip for the first cut; drag-to-edge covers the need.
 
 6. **Snap Assist (optional, later).** After a window snaps to one half, show the other

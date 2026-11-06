@@ -1,6 +1,6 @@
 # Settings
 
-UxSpace has no settings surface yet — choices like the wallpaper are hard-coded. This is the
+Glashutte has no settings surface yet — choices like the wallpaper are hard-coded. This is the
 plan for a settings store and a settings screen, starting with the wallpaper.
 
 ## Current state
@@ -53,21 +53,21 @@ the toolbar or a row under the status banner. It holds:
 - **taskbar visibility** — always-show (default) vs auto-hide (see
   [TASKBAR.md](TASKBAR.md)),
 - **scroll speed** — a slider that scales the two-finger flick → auto-scroll
-  velocity in [`TrackpadView`](../app/src/main/kotlin/com/uxspace/input/TrackpadView.kt).
+  velocity in [`TrackpadView`](../app/src/main/kotlin/io/github/dmulder/glashutte/input/TrackpadView.kt).
   Stored on `WorkspaceSettings`; read by `TrackpadView.maybeStartAutoScroll`
   and multiplied into `autoScrollFractionPerMs` before clamping. A second
   slider for the per-app scroll-pixel translation
-  ([`PrivilegedService.SCROLL_PIXELS_PER_UNIT`](../app/src/main/kotlin/com/uxspace/privileged/PrivilegedService.kt))
+  ([`PrivilegedService.SCROLL_PIXELS_PER_UNIT`](../app/src/main/kotlin/io/github/dmulder/glashutte/privileged/PrivilegedService.kt))
   lets the user tune how aggressively each unit of touchpad scroll
   translates into a swipe inside the app.
 - **app display density (DPI)** — the dpi the launched-app virtual display
-  is created at, [`VirtualScreen.APP_DISPLAY_DPI`](../spatial/src/main/kotlin/com/uxspace/spatial/VirtualScreen.kt).
+  is created at, [`VirtualScreen.APP_DISPLAY_DPI`](../spatial/src/main/kotlin/io/github/dmulder/glashutte/spatial/VirtualScreen.kt).
   Default 160 (mdpi / 1×) reads as desktop-class to most apps; raising it
   makes UI larger, lowering it denser. Sensible range 120–320. Stored on
   `WorkspaceSettings`; read on next-window creation (existing windows keep
   their density). A per-app override (a map of `packageName` → dpi) belongs
   here too, for the few apps that need a different scale.
-- room to grow — screen-size default, theme colours ([[UxSpaceTheme]]), etc.
+- room to grow — screen-size default, theme colours ([[GlashutteTheme]]), etc.
 
 It is plain phone UI (no glasses needed), so it can be a normal `Activity` or a
 `BottomSheetDialog` from `MainActivity`.

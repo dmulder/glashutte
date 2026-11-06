@@ -5,7 +5,7 @@ cluster, the running-app strip in the middle, and a right system-status tray.
 
 ## Current state
 
-[`DesktopPresentation`](../app/src/main/kotlin/com/uxspace/desktop/DesktopPresentation.kt)
+[`DesktopPresentation`](../app/src/main/kotlin/io/github/dmulder/glashutte/desktop/DesktopPresentation.kt)
 draws a full-width bar flush with the bottom edge holding three things: an app-drawer
 button, a centred strip of one icon per open window (`runningIcons`), and a clock pinned
 right. It is a real Android view hierarchy on `Theme.DeviceDefault`, so on a Samsung
@@ -37,8 +37,8 @@ desktop**, **Optometry**, **Search**.
 | Item | Action |
 |---|---|
 | App drawer (`ic_apps`, exists) | Toggles the drawer overlay — `WorkspaceController.setDrawerOpen`. Already wired; just moved to the far left. |
-| Divider | A 1dp-wide view at `UxSpaceTheme` divider colour, with vertical margins, separating the launcher from the buttons. |
-| Recent apps | A panel of apps recently opened **in the workspace** — Android's system recents API is not available to apps, so "recent" means UxSpace's own launch history. Needs a small most-recently-used list in `WorkspaceController` (`launchApp` pushes onto it). The panel reuses the drawer's overlay surface or is a small popup. |
+| Divider | A 1dp-wide view at `GlashutteTheme` divider colour, with vertical margins, separating the launcher from the buttons. |
+| Recent apps | A panel of apps recently opened **in the workspace** — Android's system recents API is not available to apps, so "recent" means Glashutte's own launch history. Needs a small most-recently-used list in `WorkspaceController` (`launchApp` pushes onto it). The panel reuses the drawer's overlay surface or is a small popup. |
 | Show desktop | Minimises every open window; a second tap restores them. Each `AppWindow` already has a `minimized` flag — add `WorkspaceController.toggleShowDesktop()` that sets/clears it on all windows. |
 | Optometry | Opens the [optometry pseudo-app](OPTOMETRY.md) — a Snellen-style chart overlay for dialling in the VITURE focus wheels. |
 | Search | Opens the drawer with its search field focused — `DrawerPresentation` already has the field; add a way to open the drawer *and* request focus on it. |
@@ -60,7 +60,7 @@ later refinement: highlight the icon of the front-most (focused) window.
 
 DeX's right edge isn't a passive readout; it's a clickable surface that opens a quick
 settings / notifications panel — wifi toggle, bluetooth, mobile data, volume slider,
-brightness slider, the notification list. UxSpace mirrors that.
+brightness slider, the notification list. Glashutte mirrors that.
 
 ### Always-visible row
 
@@ -89,7 +89,7 @@ dismissed by tapping outside or by a `×`. Layout, top to bottom:
 - **Volume slider** — `AudioManager.setStreamVolume(STREAM_MUSIC, ...)`. No permission.
 - **Quick toggles row** — Wi-Fi, Bluetooth, Mobile data, Aeroplane, Auto-rotate, Torch.
   Implemented through the privileged helper (`cmd wifi enabled`, `svc bluetooth enable`,
-  `svc data enable`, etc.) so UxSpace doesn't need each toggle's own permission. State is
+  `svc data enable`, etc.) so Glashutte doesn't need each toggle's own permission. State is
   read normally (no permission needed for read).
 - **Notifications list** — scrollable. `NotificationListenerService` mirrors current
   notifications; tap dispatches the notification's content intent; long-press = dismiss.

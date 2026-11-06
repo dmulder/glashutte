@@ -4,8 +4,12 @@ plugins {
 }
 
 android {
-    namespace = "com.uxspace.spatial"
-    compileSdk = 36
+    namespace = "io.github.dmulder.glashutte.spatial"
+    compileSdk {
+        version = release(37) {
+            minorApiLevel = 0
+        }
+    }
 
     defaultConfig {
         minSdk = 26

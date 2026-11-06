@@ -1,37 +1,34 @@
 <resources>
-    <string name="app_name">UxSpace</string>
-    <string name="workspace_title">UxSpace Workspace</string>
+    <string name="app_name">Glashutte</string>
+    <string name="workspace_title">Glashutte Workspace</string>
     <string name="apps_header">Installed apps</string>
     <string name="capture_button">Capture workspace</string>
     <string name="keyboard_hint">Type — keys go to the focused app</string>
 
     <!-- Wizard scene — privileged-helper setup over Wireless Debugging.
          See docs/PRIVILEGE.md. -->
-    <string name="privilege_title_unsupported">UxSpace can\'t run here</string>
-    <string name="privilege_title_dev_options">Unlock Developer options</string>
+    <string name="privilege_title_unsupported">Glashutte can\'t run here</string>
     <string name="privilege_title_wireless_debugging">Turn on Wireless Debugging</string>
-    <string name="privilege_title_pair">Pair UxSpace with this phone</string>
+    <string name="privilege_title_pair">Pair Glashutte with this phone</string>
     <string name="privilege_title_working">Setting things up…</string>
 
-    <string name="privilege_msg_unsupported">Needs Android 11 or newer. UxSpace activates a shell-uid helper through Wireless Debugging, an Android 11+ feature.</string>
-    <string name="privilege_msg_dev_options">Open Settings → About phone → Software information, then tap “Build number” seven times until it confirms Developer options is unlocked. Return here when done.</string>
-    <string name="privilege_msg_wireless_debugging">Enable Wireless Debugging in Developer options, then return — UxSpace reconnects automatically.</string>
-    <string name="privilege_msg_pair">Open Wireless Debugging and tap “Pair device with a pairing code”. With the pair dialog still in front, pull the notification shade down over it and type the 6-digit code into UxSpace\'s pairing notification — that way the dialog never goes to the background, which is what mDNS needs.</string>
+    <string name="privilege_msg_unsupported">Needs Android 11 or newer. Glashutte activates a shell-uid helper through Wireless Debugging, an Android 11+ feature.</string>
+    <string name="privilege_msg_wireless_debugging">Enable Wireless Debugging in Developer options, then return — Glashutte reconnects automatically. If Developer options is missing, open About phone (or Software information) and tap “Build number” seven times to unlock it.</string>
+    <string name="privilege_msg_pair">Enable Wireless Debugging in Developer options and tap “Pair device with a pairing code”. If Developer options is missing, open About phone (or Software information) and tap “Build number” seven times to unlock it. With the pair dialog still in front, pull the notification shade down over it and type the 6-digit code into Glashutte\'s pairing notification — that way the dialog never goes to the background, which is what mDNS needs.</string>
     <string name="privilege_msg_discovering">Looking for the local ADB service…</string>
     <string name="privilege_msg_connecting">Connecting to the local ADB service…</string>
     <string name="privilege_msg_starting">Starting the privileged helper…</string>
     <string name="privilege_pair_failed">Pairing failed — check the code and that the “Pair device” dialog is still open, then try again.</string>
 
-    <string name="privilege_action_open_about">Open About phone</string>
     <string name="privilege_action_open_wireless_debugging">Open Wireless Debugging</string>
     <string name="privilege_action_pair">Pair</string>
     <string name="privilege_pairing_hint">6-digit pairing code</string>
 
-    <!-- Pairing notification (RemoteInput) — see com.uxspace.privileged.PairingNotifier. -->
-    <string name="privilege_notification_channel">UxSpace pairing</string>
+    <!-- Pairing notification (RemoteInput) — see io.github.dmulder.glashutte.privileged.PairingNotifier. -->
+    <string name="privilege_notification_channel">Glashutte pairing</string>
     <string name="privilege_notification_channel_desc">Lets you enter the wireless-debugging pairing code from the notification shade.</string>
-    <string name="privilege_notification_title">UxSpace pairing</string>
-    <string name="privilege_notification_text">Type the 6-digit code from the Wireless Debugging pair dialog. Pull this shade down over the dialog and answer here — UxSpace pairs while the dialog is still in front.</string>
+    <string name="privilege_notification_title">Glashutte pairing</string>
+    <string name="privilege_notification_text">Type the 6-digit code from the Wireless Debugging pair dialog. Pull this shade down over the dialog and answer here — Glashutte pairs while the dialog is still in front.</string>
 
     <!-- Waiting scene — paired, but no external display is attached. -->
     <string name="waiting_for_glasses">Connect your VITURE glasses or an external monitor to start.</string>
@@ -40,8 +37,8 @@
     <string name="status_ready">Glasses connected — tap apps to add screens (up to 3).</string>
 
     <!-- Accessibility service — auto-opens phone keyboard when an app's text field gains focus. -->
-    <string name="accessibility_service_description">Lets UxSpace open the phone keyboard when you tap into a text field on the glasses, so you can type from the phone.</string>
+    <string name="accessibility_service_description">Lets Glashutte open the phone keyboard when you tap into a text field on the glasses, so you can type from the phone.</string>
     <string name="accessibility_setup_title">Enable typing into apps</string>
-    <string name="accessibility_setup_msg">Turn on the UxSpace accessibility service so the phone keyboard opens automatically when you tap a text field in an app on the glasses.</string>
+    <string name="accessibility_setup_msg">Turn on the Glashutte accessibility service so the phone keyboard opens automatically when you tap a text field in an app on the glasses.</string>
     <string name="accessibility_setup_action">Open Accessibility settings</string>
 </resources>

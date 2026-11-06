@@ -1,37 +1,30 @@
-# Contributing to VitureKit-Android
-
-Thanks for your interest in improving VitureKit.
+# Contributing to Glashutte
 
 ## Ground rules
 
-- **Keep the library a thin wrapper.** VitureKit wraps the official VITURE SDK; it does not
-  reverse-engineer or reimplement it. New device features belong behind the
-  [`VitureGlasses`](viturekit/src/main/kotlin/com/viturekit/VitureGlasses.kt) seam.
-- **The public API is `Flow`-first.** Prefer `StateFlow`/`SharedFlow` and coroutine-scoped
-  APIs over callbacks. Java interop is welcome but is not the design target.
-- **No leaked handles.** Anything that acquires a USB or native resource must release it via
-  the `VitureSession` lifecycle.
+- **The VITURE SDK is never committed.** Not the `.so` files, not the `viture_*.h` headers,
+  not a trimmed copy. CI fails if they appear in git. It is supplied locally; see the root
+  `README.md`.
+- **The build must work without the SDK.** Anything that needs the SDK lives in
+  `glasses/src/sdkPresent` (compiled only when the SDK is found) behind the
+  `GlassesBackend` interface; `glasses/src/sdkAbsent` provides the stub.
+- **Keep `glasses/src/main` SDK-free** so it compiles and unit-tests on any machine.
 
 ## Development setup
 
-- Android Studio with AGP 9.0+ (Kotlin is built into AGP — no Kotlin plugin is applied).
-- JDK 17+, Gradle 9.x, `compileSdk` 36.
+- No local toolchain? `make build/apk` and `make test` from the repo root run everything in a container (see the root README).
+- JDK 21, Android SDK platform 37.0, build-tools 36.0.0 (NDK 30.0.14904198 and CMake
+  4.1.2 only for builds that include the SDK).
 - Point `sdk.dir` in `local.properties` at your Android SDK.
 
 ## Before opening a pull request
 
-1. `./gradlew assembleDebug` — all modules compile.
-2. `./gradlew :viturekit:testDebugUnitTest` — library unit tests pass.
-3. New library behaviour comes with a test. Tests run against `StubVitureGlasses`, so they
-   need no hardware.
-4. Public declarations carry KDoc.
-
-## Testing without hardware
-
-`StubVitureGlasses` is a complete synthetic backend. Use it for unit tests and for running
-the sample apps. Changes that can only be verified on physical glasses should say so in the
-pull request description.
+1. `./gradlew :glasses:testDebugUnitTest :app:assembleDebug` passes without the SDK.
+2. If you touched the SDK path, also build with `-Pviture.sdk.dir=...` and say so.
+3. Changes that can only be verified on physical glasses or the Pixel should say so in the
+   pull request description (add them to the hardware checklist in
+   `docs/ARCHITECTURE.md`).
 
 ## Commit style
 
-Small, focused commits with imperative subject lines (e.g. "Add IMU frequency override").
+Small, focused commits with imperative subject lines.

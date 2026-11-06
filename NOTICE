@@ -1,0 +1,22 @@
+Glashutte
+Copyright 2026 The Glashutte contributors
+
+This product is a fork of UxSpace (https://github.com/darkclad/uxspace),
+Copyright (c) its authors, led by Demian Vladi (darkclad), licensed under the
+Apache License, Version 2.0 (see LICENSE). The workspace renderer, virtual-display
+window framework, privileged-helper bootstrap, input handling and head-tracking
+pipeline originate there. Files modified in this fork carry the same licence.
+
+The privileged-helper design follows Shizuku (https://github.com/RikkaApps/Shizuku),
+Apache-2.0, by RikkaApps.
+
+Third-party libraries used at build/run time:
+  - libadb-android (https://github.com/MuntashirAkon/libadb-android),
+    GPL-3.0-or-later OR Apache-2.0; used here under Apache-2.0
+  - sun-security-android (https://github.com/MuntashirAkon/sun-security-android),
+    GPLv2 with Classpath Exception
+  - Conscrypt (https://github.com/google/conscrypt), Apache-2.0
+
+The proprietary VITURE Android SDK is NOT part of this repository or of its source
+distribution and is not covered by this licence. It is supplied locally by whoever
+builds the application, under VITURE's own terms.

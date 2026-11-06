@@ -2,7 +2,7 @@
 
 **Working title:** VitureKit-Android (placeholder; see Naming below)
 **Status:** Draft v0.1
-**Owner:** UxSpace project
+**Owner:** Glashutte project
 **Last updated:** May 20, 2026
 
 ---

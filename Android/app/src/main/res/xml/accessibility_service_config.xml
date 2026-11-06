@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-    UxSpace's accessibility service config. We only need focus events on any window
+    Glashutte's accessibility service config. We only need focus events on any window
     so we can spot when an EditText (or other text-input) on one of our virtual
     displays gains focus, and pop up the phone-side keyboard for the user to type.
 -->

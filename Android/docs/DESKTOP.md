@@ -9,7 +9,7 @@ can be moved or removed by dragging again.
 ### Desktop index — shared across layouts
 
 A workspace has up to **three logical desktops**, identified by an index `0..2`. Each
-[`Layout`](../spatial/src/main/kotlin/com/uxspace/spatial/Layout.kt) maps its physical
+[`Layout`](../spatial/src/main/kotlin/io/github/dmulder/glashutte/spatial/Layout.kt) maps its physical
 screens (its slot ordinals) onto these desktops, anchored on the user's chosen **main
 screen**:
 
@@ -31,11 +31,11 @@ preserves the user's pinned arrangement.
 
 The main slot per layout is configurable in the
 [Settings panel](SETTINGS.md) ("Main screen" section); the default is
-[`Layout.defaultMainScreen`](../spatial/src/main/kotlin/com/uxspace/spatial/Layout.kt).
+[`Layout.defaultMainScreen`](../spatial/src/main/kotlin/io/github/dmulder/glashutte/spatial/Layout.kt).
 
 ### Storage
 
-[`DesktopShortcutsStore`](../app/src/main/kotlin/com/uxspace/desktop/DesktopShortcutsStore.kt)
+[`DesktopShortcutsStore`](../app/src/main/kotlin/io/github/dmulder/glashutte/desktop/DesktopShortcutsStore.kt)
 is a `SharedPreferences`-backed list of `DesktopShortcut(packageName, activityName, label,
 xFraction, yFraction)` per desktop index. Positions are stored as fractions of the
 screen's content rect so they survive density / shape changes when the same desktop is
@@ -45,7 +45,7 @@ rendered on a different physical screen.
 * `remove(desktopIdx, packageName)` — used by the trash drop.
 * `move(desktopIdx, packageName, x, y)` — used by drop-to-reposition.
 * `shortcutsFor(desktopIdx)` — read by the
-  [`DesktopShortcutsView`](../app/src/main/kotlin/com/uxspace/desktop/DesktopShortcutsView.kt).
+  [`DesktopShortcutsView`](../app/src/main/kotlin/io/github/dmulder/glashutte/desktop/DesktopShortcutsView.kt).
 * Change listener notifies all subscribed views.
 
 ## Gestures
@@ -92,14 +92,14 @@ Cursor click while armed:
         └─ wallpaper area                         → placeArmedDrop()
 ```
 
-* [`WorkspaceController.drawerItemAt`](../spatial/src/main/kotlin/com/uxspace/spatial/WorkspaceController.kt)
+* [`WorkspaceController.drawerItemAt`](../spatial/src/main/kotlin/io/github/dmulder/glashutte/spatial/WorkspaceController.kt)
   — global hook (only one drawer can be open).
-  Registered by [`DrawerView`](../app/src/main/kotlin/com/uxspace/desktop/DrawerView.kt)
+  Registered by [`DrawerView`](../app/src/main/kotlin/io/github/dmulder/glashutte/desktop/DrawerView.kt)
   while visible.
 * `WorkspaceController.desktopShortcutLookupFor(slotIdx)` — per-slot lookup.
   Registered by each `DesktopShortcutsView` when attached.
 * `WorkspaceController.placeArmedDrop` / `removeArmedShortcut` — wired by
-  [`UxSpaceApp`](../app/src/main/kotlin/com/uxspace/UxSpaceApp.kt) to the store; the
+  [`GlashutteApp`](../app/src/main/kotlin/io/github/dmulder/glashutte/GlashutteApp.kt) to the store; the
   rendering layer never touches `SharedPreferences` directly.
 
 ## Open follow-ups

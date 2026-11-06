@@ -194,7 +194,7 @@
             android:layout_marginHorizontal="16dp"
             android:layout_marginBottom="16dp">
 
-            <com.uxspace.input.TrackpadView
+            <io.github.dmulder.glashutte.input.TrackpadView
                 android:id="@+id/trackpad"
                 android:layout_width="match_parent"
                 android:layout_height="match_parent"

@@ -31,3 +31,6 @@ history.db
 history.db-shm
 history.db-wal
 f02aa61-build/
+
+# Proprietary native binaries are never committed (the VITURE SDK is supplied locally).
+*.so
