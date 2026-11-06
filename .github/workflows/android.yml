@@ -76,7 +76,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Build APKs in the container (no VITURE SDK)
-        run: make CONTAINER_ENGINE=docker build/apk
+        run: make CONTAINER_ENGINE=docker VITURE=off build/apk
       - name: Upload APKs
         uses: actions/upload-artifact@v4
         with:

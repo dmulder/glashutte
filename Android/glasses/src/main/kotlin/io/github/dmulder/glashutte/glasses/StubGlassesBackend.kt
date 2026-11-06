@@ -1,7 +1,5 @@
 package io.github.dmulder.glashutte.glasses
 
-import android.util.Log
-
 /**
  * The backend used when no vendor SDK was supplied at build time.
  *
@@ -17,7 +15,7 @@ class StubGlassesBackend(
     override val isSdkBacked: Boolean = false
 
     override fun open(productId: Int, usbFd: Int, options: SessionOptions): GlassesSession? {
-        Log.i(TAG, "stub backend: not opening pid=0x${productId.toString(16)} ($reason)")
+        GlassesDiagnostics.i(TAG, "stub backend: not opening pid=0x${productId.toString(16)} ($reason)")
         return null
     }
 

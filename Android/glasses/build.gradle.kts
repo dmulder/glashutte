@@ -17,6 +17,8 @@ plugins {
 //   2. the VITURE_SDK_DIR environment variable
 //   3. <repo>/Android/libs/viture-sdk/                   (git-ignored)
 // Pass -Pviture.sdk=off to force the stub even if an SDK is present.
+// Pass -Pviture.sdk=required to FAIL the build when no SDK is found instead of silently
+// falling back to the stub (the Makefile / container build does this unless VITURE=off).
 //
 // Native libraries may be under <sdk>/android/ (vendor layout) or <sdk>/libs/.
 //   <sdk>/include/viture_*.h
@@ -27,8 +29,26 @@ fun vitureNativeLibsDir(sdkDir: File): File =
         .firstOrNull { File(it, "arm64-v8a/libglasses.so").isFile }
         ?: File(sdkDir, "libs")
 
+val vitureSdkMode: String = providers.gradleProperty("viture.sdk").orNull?.lowercase() ?: "auto"
+val vitureSdkRequired = vitureSdkMode == "required"
+
+fun missingSdk(reason: String): Nothing = throw GradleException(
+    """
+    |
+    |  VITURE SDK required but not usable: $reason
+    |
+    |  A build without the SDK is a STUB: it installs and shows the workspace on the glasses,
+    |  but it can NEVER do 3DoF/6DoF head tracking.
+    |
+    |  Put the SDK in Android/libs/viture-sdk/ (include/viture_glasses_provider.h and
+    |  libs/arm64-v8a/libglasses.so or android/arm64-v8a/libglasses.so), or point at it with
+    |  -Pviture.sdk.dir=/path or VITURE_SDK_DIR=/path. To build the stub on purpose, pass
+    |  -Pviture.sdk=off (make: VITURE=off).
+    """.trimMargin(),
+)
+
 val vitureSdkDir: File? = run {
-    if (providers.gradleProperty("viture.sdk").orNull.equals("off", ignoreCase = true)) {
+    if (vitureSdkMode == "off") {
         return@run null
     }
     val configured = providers.gradleProperty("viture.sdk.dir").orNull
@@ -40,6 +60,7 @@ val vitureSdkDir: File? = run {
         layout.file(provider { File(dir, "include/viture_glasses_provider.h") }),
     ).asText
     if (!marker.isPresent) {
+        if (vitureSdkRequired) missingSdk("no include/viture_glasses_provider.h under $dir")
         if (configured != null) {
             logger.warn("viture.sdk.dir='$configured' has no include/viture_glasses_provider.h — building with the stub backend")
         }
@@ -55,10 +76,14 @@ val vitureSdkDir: File? = run {
     dir
 }
 val hasVitureSdk = vitureSdkDir != null
-logger.lifecycle(
-    if (hasVitureSdk) ":glasses: VITURE SDK found at $vitureSdkDir — building the SDK-backed backend"
-    else ":glasses: VITURE SDK not supplied — building with the stub glasses backend",
-)
+if (hasVitureSdk) {
+    logger.lifecycle(":glasses: VITURE SDK found at $vitureSdkDir — building the SDK-backed backend")
+} else {
+    logger.warn(
+        ":glasses: *** WARNING: VITURE SDK not supplied — building the STUB backend. " +
+            "This APK will have NO head tracking. (-Pviture.sdk=required makes this an error.) ***",
+    )
+}
 
 android {
     namespace = "io.github.dmulder.glashutte.glasses"

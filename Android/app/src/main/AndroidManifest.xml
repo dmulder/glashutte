@@ -23,6 +23,15 @@
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
 
     <!--
+      Android withholds USB access to a device that exposes a video-class interface until the
+      app holds CAMERA. The glasses' Carina VIO cameras do, so 6DOF head tracking may need it.
+      Requested only when the glasses USB device actually has such an interface (see
+      GlassesUsb / MainActivity). `required=false` keeps the app installable on camera-less devices.
+    -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
+
+    <!--
       WorkspaceService is a foreground service tied to the glasses USB session — it lets
       Glashutte keep the workspace + launched apps alive while the phone screen is off, and
       its onDestroy is the cleanup anchor that force-stops launched apps when the glasses
@@ -76,6 +85,28 @@
                 android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED"
                 android:resource="@xml/device_filter" />
         </activity>
+
+        <!-- Head-tracking diagnostics + log export (own launcher icon). -->
+        <activity
+            android:name=".DiagnosticsActivity"
+            android:exported="true"
+            android:label="Glashutte Diagnostics"
+            android:screenOrientation="portrait">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.diagfiles"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
 
         <!--
           Receives the PrivilegedServer's Binder back from the shell-uid process. The server

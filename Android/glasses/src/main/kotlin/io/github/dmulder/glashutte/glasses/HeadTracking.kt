@@ -3,7 +3,6 @@ package io.github.dmulder.glashutte.glasses
 import android.content.Context
 import android.hardware.usb.UsbDevice
 import android.hardware.usb.UsbDeviceConnection
-import android.util.Log
 import java.util.concurrent.Executors
 
 /**
@@ -87,6 +86,13 @@ class HeadTracking(
     /** Fires when the pose stream starts or stops. Posted from the poll thread. */
     var onStreamingChanged: ((streaming: Boolean) -> Unit)? = null
 
+    /**
+     * Fired when Android will not hand over the glasses' USB device until the CAMERA
+     * permission is granted (the glasses expose a USB video interface). The host activity
+     * should request CAMERA and then call [start] again.
+     */
+    var onCameraPermissionNeeded: (() -> Unit)? = null
+
     // App-side heading recentre (and 6DOF position recentre); the first pose after a (re)start
     // becomes the reference. Only touched from the pose-polling thread.
     private val recenterer = PoseRecenterer()
@@ -104,12 +110,23 @@ class HeadTracking(
      */
     fun start() = synchronized(lifecycleLock) {
         if (started) {
-            Log.d(TAG, "start() ignored — head tracking already started")
+            GlassesDiagnostics.d(TAG, "start() ignored — head tracking already started")
             return
         }
-        val glassesUsb = usb ?: GlassesUsb(appContext, ::onUsbOpened, ::onUsbDenied).also { usb = it }
+        val glassesUsb = usb ?: GlassesUsb(appContext, ::onUsbOpened, ::onUsbDenied).also {
+            usb = it
+            it.onCameraPermissionNeeded = { onCameraPermissionNeeded?.invoke() }
+        }
+        GlassesDiagnostics.init(appContext)
+        GlassesDiagnostics.beginSession()
+        GlassesDiagnostics.put("backend", backend.name)
         val device = glassesUsb.find()
         if (device == null) {
+            GlassesDiagnostics.stage(
+                GlassesDiagnostics.Stage.USB_DEVICE, GlassesDiagnostics.Status.FAIL,
+                "no VITURE glasses USB device visible to Android (see the USB device list below); " +
+                    "check the cable/port, or the glasses' PID may be unknown",
+            )
             // Don't latch — leave [started] false so a later USB_DEVICE_ATTACHED
             // re-entry can succeed. The display side of the glasses can come up before
             // the USB IMU endpoint enumerates; without retry that brief race kills DOF
@@ -120,14 +137,20 @@ class HeadTracking(
             // genuine start() preserve the (spent) retry count instead of resetting it,
             // permanently disabling auto-retry for the session.
             autoRestartScheduled = false
-            Log.i(TAG, "no VITURE glasses found on USB — head tracking off (will retry on USB attach)")
+            GlassesDiagnostics.i(TAG, "no VITURE glasses found on USB — head tracking off (will retry on USB attach)")
             return
         }
         started = true
         // A fresh user-initiated start (or USB attach) — give the auto-retry budget back,
         // unless this start() is itself an auto-restart (which preserves the running count).
         if (!autoRestartScheduled) autoRetryCount = 0
-        Log.i(TAG, "found glasses, pid=0x${device.productId.toString(16)}")
+        GlassesDiagnostics.i(TAG, "found glasses, pid=0x${device.productId.toString(16)}")
+        GlassesDiagnostics.put("usb.pid", "0x${device.productId.toString(16)}")
+        GlassesDiagnostics.put("usb.productName", runCatching { device.productName }.getOrNull())
+        GlassesDiagnostics.stage(
+            GlassesDiagnostics.Stage.USB_DEVICE, GlassesDiagnostics.Status.OK,
+            "glasses found: vid=0x%04x pid=0x%04x".format(device.vendorId, device.productId),
+        )
         glassesUsb.open(device)
     }
 
@@ -155,7 +178,9 @@ class HeadTracking(
     }
 
     private fun onUsbDenied() {
-        Log.w(TAG, "USB permission denied — head tracking off")
+        GlassesDiagnostics.w(TAG, "USB permission denied — head tracking off")
+        // Latch cleared so a later attach / manual retry can ask again.
+        started = false
     }
 
     private fun onUsbOpened(device: UsbDevice, connection: UsbDeviceConnection) {
@@ -167,14 +192,29 @@ class HeadTracking(
 
     /** Runs on [worker]: open a backend session, then start polling its poses. */
     private fun startSdk(pid: Int, fd: Int) {
-        Log.i(TAG, "opening session on backend '${backend.name}' (pid=0x${pid.toString(16)})")
-        val opened = backend.open(pid, fd, SessionOptions(sixDof = use6Dof()))
+        GlassesDiagnostics.i(TAG, "opening session on backend '${backend.name}' (pid=0x${pid.toString(16)})")
+        val opened = try {
+            val options = SessionOptions(
+                sixDof = use6Dof(),
+                pathOverride = TrackingExperiments.pathOverride(appContext),
+                sdkCacheDir = if (TrackingExperiments.initCacheDir(appContext)) appContext.cacheDir.absolutePath else null,
+            )
+            backend.open(pid, fd, options)
+        } catch (t: Throwable) {
+            // e.g. UnsatisfiedLinkError when libglasses_bridge/libglasses cannot be loaded.
+            GlassesDiagnostics.e(TAG, "backend '${backend.name}'.open threw", t)
+            GlassesDiagnostics.stage(
+                GlassesDiagnostics.Stage.SDK_CREATE, GlassesDiagnostics.Status.FAIL,
+                "backend.open threw ${t.javaClass.simpleName}: ${t.message}",
+            )
+            return
+        }
         if (opened == null) {
-            Log.w(TAG, "backend '${backend.name}' did not open a session — head tracking off")
+            GlassesDiagnostics.w(TAG, "backend '${backend.name}' did not open a session — head tracking off")
             return
         }
         session = opened
-        Log.i(TAG, "session open: ${opened.capabilities}")
+        GlassesDiagnostics.i(TAG, "session open: ${opened.capabilities}")
         startPolling(opened)
     }
 
@@ -211,9 +251,13 @@ class HeadTracking(
                 val pose = active.pollPose()
                 if (pose != null) {
                     firstPoseArrived = true
+                    GlassesDiagnostics.onPoseSample(
+                        pose.w, pose.x, pose.y, pose.z, pose.hasPosition, pose.px, pose.py, pose.pz,
+                    )
                     feedPose(pose.w, pose.x, pose.y, pose.z)
                     if (pose.hasPosition) feedPosition(pose.px, pose.py, pose.pz)
                 }
+                GlassesDiagnostics.tick(active::diagnostics)
                 checkInitialPoseWatchdog()
                 checkStreamWatchdog()
                 try {
@@ -247,7 +291,11 @@ class HeadTracking(
             // (or a USB re-attach) still works. Log once — guard so we don't spam.
             if (!autoRestartScheduled) {
                 autoRestartScheduled = true  // reuse as a latch to silence repeats
-                Log.w(
+                GlassesDiagnostics.stage(
+                    GlassesDiagnostics.Stage.POSE_STREAM, GlassesDiagnostics.Status.FAIL,
+                    "no pose ever arrived (waited $sinceMs ms, $autoRetryCount auto-restarts); giving up",
+                )
+                GlassesDiagnostics.w(
                     TAG,
                     "no first pose after $sinceMs ms and $autoRetryCount auto-retries — " +
                         "giving up (manual reconnect still available)",
@@ -257,14 +305,18 @@ class HeadTracking(
         }
         autoRestartScheduled = true
         autoRetryCount++
-        Log.w(
+        GlassesDiagnostics.stage(
+            GlassesDiagnostics.Stage.POSE_STREAM, GlassesDiagnostics.Status.WARN,
+            "no pose within ${sinceMs} ms of starting the session; auto-restart $autoRetryCount/$MAX_AUTO_RETRIES",
+        )
+        GlassesDiagnostics.w(
             TAG,
             "no first pose after $sinceMs ms — auto-restarting tracking " +
                 "(attempt $autoRetryCount/$MAX_AUTO_RETRIES)",
         )
         worker.execute {
             runCatching { restartInternal() }
-                .onFailure { Log.e(TAG, "auto-restart failed", it) }
+                .onFailure { GlassesDiagnostics.e(TAG, "auto-restart failed", it) }
         }
     }
 
@@ -276,10 +328,10 @@ class HeadTracking(
         // If a deliberate stop() landed between scheduling this and acquiring the lock,
         // don't resurrect tracking the user asked to end.
         if (!autoRestartScheduled) {
-            Log.i(TAG, "restartInternal: superseded by stop() — skipping")
+            GlassesDiagnostics.i(TAG, "restartInternal: superseded by stop() — skipping")
             return
         }
-        Log.i(TAG, "restartInternal: tearing down SDK/USB for auto-retry")
+        GlassesDiagnostics.i(TAG, "restartInternal: tearing down SDK/USB for auto-retry")
         polling = false
         pollThread?.interrupt()
         pollThread = null
@@ -307,7 +359,11 @@ class HeadTracking(
         val sinceMs = now - lastPoseAtMs
         if (sinceMs > STREAM_STALL_TIMEOUT_MS) {
             streaming = false
-            Log.w(TAG, "pose stream stalled — no pose for ${sinceMs}ms (DOF lost)")
+            GlassesDiagnostics.stage(
+                GlassesDiagnostics.Stage.POSE_STREAM, GlassesDiagnostics.Status.WARN,
+                "pose stream stalled: nothing for ${sinceMs} ms",
+            )
+            GlassesDiagnostics.w(TAG, "pose stream stalled — no pose for ${sinceMs}ms (DOF lost)")
             runCatching { onStreamingChanged?.invoke(false) }
         }
     }
@@ -317,10 +373,15 @@ class HeadTracking(
         lastPoseAtMs = System.currentTimeMillis()
         if (!streaming) {
             streaming = true
-            Log.i(TAG, "pose stream live (DOF up)")
+            GlassesDiagnostics.stage(
+                GlassesDiagnostics.Stage.POSE_STREAM, GlassesDiagnostics.Status.OK,
+                "pose stream live",
+            )
+            GlassesDiagnostics.i(TAG, "pose stream live (DOF up)")
             runCatching { onStreamingChanged?.invoke(true) }
         }
         recenterer.recenterOrientation(w, x, y, z, orientationOut)
+        GlassesDiagnostics.onPoseDelivered(orientationOut[0], orientationOut[1], orientationOut[2], orientationOut[3])
         onPose(orientationOut[0], orientationOut[1], orientationOut[2], orientationOut[3])
     }
 

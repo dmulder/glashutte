@@ -5,8 +5,12 @@
 // support is intentionally omitted.
 #include <jni.h>
 #include <android/log.h>
+#include <dlfcn.h>
 #include <atomic>
+#include <cstdio>
+#include <deque>
 #include <mutex>
+#include <string>
 #include <thread>
 #include <chrono>
 #include <cstring>
@@ -58,6 +62,63 @@ static std::atomic<bool> g_poll_running{false};
 static std::thread g_poll_thread;
 
 // ---------------------------------------------------------------------------
+// Diagnostics: counters the Kotlin side reads to show which stage of the tracking pipeline
+// is alive. They never influence behaviour.
+// ---------------------------------------------------------------------------
+
+struct NativeStats {
+    std::atomic<long> poll_attempts{0};   // get_gl_pose_carina calls
+    std::atomic<long> poll_ok{0};         // ... that returned SUCCESS
+    std::atomic<long> poll_fail{0};
+    std::atomic<int>  last_poll_rc{0};
+    std::atomic<long> poll_bad_quat{0};   // SUCCESS but quaternion not unit length
+    std::atomic<long> imu_pose_cb{0};     // Gen1/2 pose callback invocations
+    std::atomic<long> carina_pose_cb{0};  // Carina pose callback (camera rate, ~25 Hz)
+    std::atomic<long> carina_imu_cb{0};   // Carina raw IMU callback
+    std::atomic<long> carina_camera_cb{0};// Carina stereo camera frames
+    std::atomic<int>  carina_cb_rc{-999}; // rc of register_callbacks_carina (-999 = not called)
+    std::atomic<int>  camera_cb_wanted{0};
+    std::atomic<int>  cam_w{0};
+    std::atomic<int>  cam_h{0};
+    std::atomic<int>  pose_status{1};
+};
+static NativeStats g_stats;
+
+// Last lines libglasses logged through the SDK log hook (when the SDK has one).
+static std::mutex g_sdklog_mtx;
+static std::deque<std::string> g_sdklog;
+static constexpr size_t SDK_LOG_MAX_LINES = 400;
+static std::atomic<int> g_sdk_log_hooked{0};
+
+static void sdk_log_hook(int level, const char* tag, const char* message) {
+    int prio = level <= 1 ? ANDROID_LOG_ERROR : (level == 2 ? ANDROID_LOG_INFO : ANDROID_LOG_DEBUG);
+    __android_log_print(prio, "Glashutte/SdkLog", "[%s] %s", tag ? tag : "", message ? message : "");
+    char line[512];
+    snprintf(line, sizeof(line), "L%d [%s] %s", level, tag ? tag : "", message ? message : "");
+    std::lock_guard<std::mutex> lk(g_sdklog_mtx);
+    g_sdklog.emplace_back(line);
+    while (g_sdklog.size() > SDK_LOG_MAX_LINES) g_sdklog.pop_front();
+}
+
+// Entry points that may be missing from a given SDK release. Resolved at runtime so that
+// this bridge still loads (and tracking still works) against an SDK that lacks them.
+typedef void (*SdkLogHookFn)(int, const char*, const char*);
+typedef void (*SetLogHookFn)(SdkLogHookFn);
+typedef void (*SetLogLevelFn)(int);
+typedef int  (*IsProductIdValidFn)(int);
+typedef int  (*GetMarketNameFn)(int, char*, int*);
+typedef int  (*RegisterCarinaCbFn)(XRDeviceProviderHandle, XRPoseCallback, XRVSyncCallback,
+                                   XRImuCallback, XRCameraCallback);
+typedef int  (*CameraPidFn)(int);
+
+static void* sdk_symbol(const char* name) {
+    static void* lib = dlopen("libglasses.so", RTLD_NOW);
+    void* sym = lib ? dlsym(lib, name) : nullptr;
+    if (!sym) sym = dlsym(RTLD_DEFAULT, name);
+    return sym;
+}
+
+// ---------------------------------------------------------------------------
 // SDK callbacks
 // ---------------------------------------------------------------------------
 
@@ -75,22 +136,55 @@ static void state_cb(int id, int value) {
 }
 
 static void imu_pose_cb(float* data, uint64_t /*ts*/) {
+    g_stats.imu_pose_cb++;
     std::lock_guard<std::mutex> lk(g_pose.mtx);
     memcpy(g_pose.data, data, 7 * sizeof(float));
     g_pose.fresh = true;
+}
+
+static void carina_pose_cb(float*, double) { g_stats.carina_pose_cb++; }
+static void carina_imu_cb(float*, double) { g_stats.carina_imu_cb++; }
+static void carina_camera_cb(char*, char*, char*, char*, double, int w, int h) {
+    g_stats.carina_camera_cb++;
+    g_stats.cam_w = w;
+    g_stats.cam_h = h;
 }
 
 static void carina_poll_fn() {
     float pose[7] = {};
     while (g_poll_running) {
         int status = 1;
-        if (g_handle &&
-            xr_device_provider_get_gl_pose_carina(g_handle, pose, 0.0, &status)
-                == VITURE_GLASSES_SUCCESS) {
-            std::lock_guard<std::mutex> lk(g_pose.mtx);
-            memcpy(g_pose.data, pose, 7 * sizeof(float));
-            g_pose.pose_status = status;
-            g_pose.fresh       = true;
+        if (g_handle) {
+            int rc = xr_device_provider_get_gl_pose_carina(g_handle, pose, 0.0, &status);
+            g_stats.poll_attempts++;
+            g_stats.last_poll_rc = rc;
+            if (rc == VITURE_GLASSES_SUCCESS) {
+                long n = ++g_stats.poll_ok;
+                g_stats.pose_status = status;
+                float norm2 = pose[3] * pose[3] + pose[4] * pose[4] +
+                              pose[5] * pose[5] + pose[6] * pose[6];
+                if (norm2 < 0.81f || norm2 > 1.21f) {
+                    long bad = ++g_stats.poll_bad_quat;
+                    if (bad <= 3) {
+                        LOGE("carina pose has non-unit quaternion q=(%.3f %.3f %.3f %.3f) status=%d",
+                             pose[3], pose[4], pose[5], pose[6], status);
+                    }
+                }
+                if (n == 1) {
+                    LOGI("first carina pose p=(%.3f %.3f %.3f) q=(%.3f %.3f %.3f %.3f) status=%d",
+                         pose[0], pose[1], pose[2], pose[3], pose[4], pose[5], pose[6], status);
+                }
+                std::lock_guard<std::mutex> lk(g_pose.mtx);
+                memcpy(g_pose.data, pose, 7 * sizeof(float));
+                g_pose.pose_status = status;
+                g_pose.fresh       = true;
+            } else {
+                long f = ++g_stats.poll_fail;
+                if (f <= 5 || f % 500 == 0) {
+                    LOGE("get_gl_pose_carina rc=%d (failure #%ld, %ld ok so far)",
+                         rc, f, g_stats.poll_ok.load());
+                }
+            }
         }
         std::this_thread::sleep_for(std::chrono::microseconds(8333));  // ~120 Hz
     }
@@ -181,6 +275,19 @@ Java_io_github_dmulder_glashutte_glasses_NativeGlasses_initialize(JNIEnv*, jobje
     if (!g_handle) return VITURE_GLASSES_ERROR_INVALID_PARAM;
     int r = xr_device_provider_initialize(g_handle, nullptr, nullptr);
     if (r != VITURE_GLASSES_SUCCESS) LOGE("initialize failed: %d", r);
+    return r;
+}
+
+// Same as initialize(), but hands the SDK a writable directory for its calibration cache.
+JNIEXPORT jint JNICALL
+Java_io_github_dmulder_glashutte_glasses_NativeGlasses_initializeWithCacheDir(
+    JNIEnv* env, jobject, jstring cacheDir) {
+    std::lock_guard<std::mutex> lk(g_lifecycle_mtx);
+    if (!g_handle) return VITURE_GLASSES_ERROR_INVALID_PARAM;
+    const char* dir = cacheDir ? env->GetStringUTFChars(cacheDir, nullptr) : nullptr;
+    int r = xr_device_provider_initialize(g_handle, nullptr, dir);
+    if (dir) env->ReleaseStringUTFChars(cacheDir, dir);
+    if (r != VITURE_GLASSES_SUCCESS) LOGE("initialize(cacheDir) failed: %d", r);
     return r;
 }
 
@@ -362,6 +469,116 @@ JNIEXPORT jint JNICALL
 Java_io_github_dmulder_glashutte_glasses_NativeGlasses_getFilm(JNIEnv*, jobject) {
     std::lock_guard<std::mutex> lk(g_dev.mtx);
     return g_dev.film;
+}
+
+// ---------------------------------------------------------------------------
+// Diagnostics JNI (read-only probes; none of these change tracking behaviour except
+// registerCarinaDiagCallbacks, which only installs counting callbacks)
+// ---------------------------------------------------------------------------
+
+// Raise the SDK's own log level and mirror its log lines into logcat (tag Glashutte/SdkLog)
+// and an in-process ring buffer. Returns a short description of what the SDK supports.
+JNIEXPORT jstring JNICALL
+Java_io_github_dmulder_glashutte_glasses_NativeGlasses_enableSdkLogging(JNIEnv* env, jobject, jint level) {
+    std::string out;
+    auto set_level = reinterpret_cast<SetLogLevelFn>(sdk_symbol("xr_device_provider_set_log_level"));
+    auto set_hook  = reinterpret_cast<SetLogHookFn>(sdk_symbol("xr_device_provider_set_log_hook"));
+    if (set_level) { set_level(level); out += "set_log_level=ok "; } else { out += "set_log_level=missing "; }
+    if (set_hook) {
+        set_hook(sdk_log_hook);
+        g_sdk_log_hooked = 1;
+        out += "set_log_hook=ok";
+    } else {
+        out += "set_log_hook=missing";
+    }
+    return env->NewStringUTF(out.c_str());
+}
+
+JNIEXPORT jstring JNICALL
+Java_io_github_dmulder_glashutte_glasses_NativeGlasses_getSdkLog(JNIEnv* env, jobject) {
+    std::string all;
+    {
+        std::lock_guard<std::mutex> lk(g_sdklog_mtx);
+        for (const auto& l : g_sdklog) { all += l; all += '\n'; }
+    }
+    return env->NewStringUTF(all.c_str());
+}
+
+// What the SDK says about a USB product id: valid?, market name, native-DOF, camera ids.
+JNIEXPORT jstring JNICALL
+Java_io_github_dmulder_glashutte_glasses_NativeGlasses_probeProduct(JNIEnv* env, jobject, jint pid) {
+    char buf[256];
+    std::string out;
+    auto valid = reinterpret_cast<IsProductIdValidFn>(sdk_symbol("xr_device_provider_is_product_id_valid"));
+    snprintf(buf, sizeof(buf), "sdk_knows_pid=%s ", valid ? (valid(pid) ? "yes" : "NO") : "unknown(api missing)");
+    out += buf;
+    auto market = reinterpret_cast<GetMarketNameFn>(sdk_symbol("xr_device_provider_get_market_name"));
+    if (market) {
+        char name[128] = {};
+        int len = sizeof(name) - 1;
+        int rc = market(pid, name, &len);
+        name[sizeof(name) - 1] = 0;
+        snprintf(buf, sizeof(buf), "market_name='%s'(rc=%d) ", name, rc);
+        out += buf;
+    } else {
+        out += "market_name=unknown(api missing) ";
+    }
+    snprintf(buf, sizeof(buf), "native_dof=%d ", xr_device_provider_is_product_support_native_dof(pid));
+    out += buf;
+    auto cam_vid = reinterpret_cast<CameraPidFn>(sdk_symbol("xr_camera_provider_get_camera_vid"));
+    auto cam_pid = reinterpret_cast<CameraPidFn>(sdk_symbol("xr_camera_provider_get_camera_pid"));
+    if (cam_vid && cam_pid) {
+        snprintf(buf, sizeof(buf), "camera_usb=%04x:%04x", cam_vid(pid), cam_pid(pid));
+        out += buf;
+    } else {
+        out += "camera_usb=unknown(api missing)";
+    }
+    return env->NewStringUTF(out.c_str());
+}
+
+// Carina only: install counting callbacks so we can tell whether the IMU, the pose estimator
+// and (6DoF only) the stereo cameras are producing data. Call after create, before initialize.
+JNIEXPORT jint JNICALL
+Java_io_github_dmulder_glashutte_glasses_NativeGlasses_registerCarinaDiagCallbacks(
+    JNIEnv*, jobject, jboolean withCamera) {
+    std::lock_guard<std::mutex> lk(g_lifecycle_mtx);
+    if (!g_handle) return VITURE_GLASSES_ERROR_INVALID_PARAM;
+    auto reg = reinterpret_cast<RegisterCarinaCbFn>(sdk_symbol("xr_device_provider_register_callbacks_carina"));
+    if (!reg) { g_stats.carina_cb_rc = -998; return -998; }
+    g_stats.camera_cb_wanted = withCamera ? 1 : 0;
+    int rc = reg(g_handle, carina_pose_cb, nullptr, carina_imu_cb,
+                 withCamera ? carina_camera_cb : nullptr);
+    g_stats.carina_cb_rc = rc;
+    return rc;
+}
+
+// "key=value;key=value" snapshot of the counters above plus the cached pose status.
+JNIEXPORT jstring JNICALL
+Java_io_github_dmulder_glashutte_glasses_NativeGlasses_getNativeStats(JNIEnv* env, jobject) {
+    char buf[640];
+    snprintf(buf, sizeof(buf),
+             "poll_attempts=%ld;poll_ok=%ld;poll_fail=%ld;last_poll_rc=%d;poll_bad_quat=%ld;"
+             "pose_status=%d;imu_pose_cb=%ld;carina_pose_cb=%ld;carina_imu_cb=%ld;"
+             "carina_camera_frames=%ld;camera_cb_wanted=%d;camera_wh=%dx%d;"
+             "carina_cb_rc=%d;sdk_log_hooked=%d;poll_running=%d;handle=%d",
+             g_stats.poll_attempts.load(), g_stats.poll_ok.load(), g_stats.poll_fail.load(),
+             g_stats.last_poll_rc.load(), g_stats.poll_bad_quat.load(),
+             g_stats.pose_status.load(), g_stats.imu_pose_cb.load(), g_stats.carina_pose_cb.load(),
+             g_stats.carina_imu_cb.load(), g_stats.carina_camera_cb.load(),
+             g_stats.camera_cb_wanted.load(), g_stats.cam_w.load(), g_stats.cam_h.load(),
+             g_stats.carina_cb_rc.load(), g_sdk_log_hooked.load(), g_poll_running.load() ? 1 : 0,
+             g_handle ? 1 : 0);
+    return env->NewStringUTF(buf);
+}
+
+// Zero the per-session counters (called at the start of every session).
+JNIEXPORT void JNICALL
+Java_io_github_dmulder_glashutte_glasses_NativeGlasses_resetNativeStats(JNIEnv*, jobject) {
+    g_stats.poll_attempts = 0; g_stats.poll_ok = 0; g_stats.poll_fail = 0;
+    g_stats.last_poll_rc = 0; g_stats.poll_bad_quat = 0;
+    g_stats.imu_pose_cb = 0; g_stats.carina_pose_cb = 0; g_stats.carina_imu_cb = 0;
+    g_stats.carina_camera_cb = 0; g_stats.carina_cb_rc = -999; g_stats.camera_cb_wanted = 0;
+    g_stats.cam_w = 0; g_stats.cam_h = 0; g_stats.pose_status = 1;
 }
 
 }  // extern "C"

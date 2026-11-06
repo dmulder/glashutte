@@ -40,13 +40,19 @@ sync_tree() {
 
 gradle_flags() {
     GRADLE_FLAGS=(--no-daemon --console=plain)
-    if [ "${GLASHUTTE_VITURE_SDK:-auto}" = "off" ]; then
+    if [ "${GLASHUTTE_VITURE_SDK:-required}" = "off" ]; then
+        # Stub on purpose: no head tracking.
         GRADLE_FLAGS+=(-Pviture.sdk=off)
         unset VITURE_SDK_DIR
+        echo ">>> building the STUB backend (VITURE=off): this APK will have NO head tracking" >&2
     elif [ -f /viture-sdk/include/viture_glasses_provider.h ]; then
         export VITURE_SDK_DIR=/viture-sdk
+        GRADLE_FLAGS+=(-Pviture.sdk=required)
     else
-        unset VITURE_SDK_DIR
+        echo "error: VITURE SDK not mounted at /viture-sdk. A build without it is a stub with NO head" >&2
+        echo "       tracking. Provide the SDK (make build/apk VITURE_SDK_DIR=/path) or build the stub on" >&2
+        echo "       purpose with VITURE=off." >&2
+        exit 3
     fi
     # Extra user flags, e.g. GRADLE_ARGS="--info".
     # shellcheck disable=SC2206
@@ -59,6 +65,24 @@ sdk_tag() {
     if [ -n "${VITURE_SDK_DIR:-}" ]; then echo "with-viture-sdk"; else echo "no-viture-sdk"; fi
 }
 
+verify_apk() { # verify_apk <apk>: the SDK libraries must be packaged exactly when the name says so
+    local apk="$1" libs
+    libs="$(unzip -Z1 "$apk" | grep -E '(^|/)(libglasses|libglasses_bridge|libcarina_vio|libcloud_protocol)\.so$' || true)"
+    if [ -n "${VITURE_SDK_DIR:-}" ]; then
+        for need in libglasses.so libglasses_bridge.so; do
+            echo "$libs" | grep -q "lib/arm64-v8a/$need" || {
+                echo "error: $apk was built 'with the SDK' but lib/arm64-v8a/$need is not packaged in it" >&2
+                exit 4
+            }
+        done
+        echo "verified: SDK libraries packaged:" >&2
+        echo "$libs" | sed 's/^/    /' >&2
+    elif [ -n "$libs" ]; then
+        echo "error: stub build unexpectedly contains SDK libraries: $libs" >&2
+        exit 4
+    fi
+}
+
 collect() { # collect <debug|release>
     local variant="$1" dir="$APP/app/build/outputs/apk/$1" found=0 f
     mkdir -p /out
@@ -66,6 +90,7 @@ collect() { # collect <debug|release>
         [ -e "$f" ] || continue
         local base
         base="$(basename "$f" .apk | sed 's/^app-//')"
+        verify_apk "$f"
         cp -f "$f" "/out/glashutte-${base}-$(sdk_tag).apk"
         echo "wrote /out/glashutte-${base}-$(sdk_tag).apk"
         found=1

@@ -25,8 +25,12 @@
 - **VITURE Android SDK only.** No separate open-protocol (HID) backends. Head tracking
   and display control sit behind a small `GlassesBackend` interface
   ([`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)), so the SDK is an optional build input.
-- **Builds without the SDK.** Without the SDK you get a stub backend: the workspace still
-  runs on the glasses' display in PINNED view, just without head tracking.
+- **Head tracking needs an SDK build.** Without the SDK you get a stub backend: the workspace still
+  runs on the glasses' display in PINNED view, but it can **never** track your head. The container
+  build (`make build/apk`) therefore **fails** when the SDK is missing; the stub needs an explicit
+  `VITURE=off`. APK names tell you which you have: `-with-viture-sdk.apk` vs `-no-viture-sdk.apk`.
+- **No head tracking on a with-SDK build?** Open the **Glashutte Diagnostics** app icon or follow
+  [`docs/HEAD-TRACKING-DEBUG.md`](docs/HEAD-TRACKING-DEBUG.md); one run shows which stage fails.
 - **DRM apps via a flat "native handoff" mode (planned).** Apps that render protected
   content cannot be re-rendered into a head-tracked scene, so the plan is to hand the
   glasses' display to such an app natively (flat, no head tracking) and return to the
@@ -49,7 +53,7 @@ checklist in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md#7-hardware-test-check
 | Native handoff mode for DRM apps                  | Planned                                            |
 | SBS / stereo output                               | Not implemented (mono image mirrored to both eyes) |
 
-## Supplying the VITURE SDK (optional, local only)
+## Supplying the VITURE SDK (required for head tracking, local only)
 
 The VITURE Android SDK is proprietary. **It is never committed to this repository and is
 never distributed by it.** You obtain it yourself from the
@@ -78,8 +82,18 @@ If both contain `arm64-v8a/libglasses.so`, the build uses `libs/`.
 
 Tested against SDK 2.4.0 on the upstream author's hardware. Extra build requirements when
 the SDK is present: NDK `30.0.14904198` and CMake `4.1.2` (install via the SDK Manager).
-Pass `-Pviture.sdk=off` to force the stub backend even if an SDK is present. The build
-prints which one it chose (`:glasses: VITURE SDK found ...` or `... not supplied ...`).
+Gradle modes (`-Pviture.sdk=...`):
+
+| Value | Behaviour |
+|---|---|
+| (unset) | Use the SDK if found; otherwise build the stub and print a loud `WARNING ... STUB backend` line. CI and quick UI work use this. |
+| `required` | **Fail** if the SDK is missing or incomplete. The container build uses this. |
+| `off` | Build the stub even if an SDK is present. |
+
+The build prints which one it chose (`:glasses: VITURE SDK found ...` or `... STUB backend ...`).
+Check an APK with `unzip -l app-debug.apk | grep libglasses`: a with-SDK build contains
+`lib/arm64-v8a/libglasses.so` and `libglasses_bridge.so`; a stub contains neither. A running app
+also says so: the diagnostics screen shows `backend` and a stub build shows a banner on the glasses.
 
 ## Building
 
@@ -94,8 +108,9 @@ echo "sdk.dir=$HOME/Android/Sdk" > local.properties   # path to your Android SDK
 adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
 
-The same command builds with or without the SDK. CI runs exactly this, without the SDK,
-and uploads the stub-backend debug APK as a build artifact. Build notes and the
+The same command builds with or without the SDK (add `-Pviture.sdk=required` to make a missing
+SDK an error). CI runs exactly this, without the SDK, and uploads the stub-backend debug APK as
+a build artifact; that artifact cannot track your head. Build notes and the
 dependency (JitPack) caveat are in
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md#6-build-and-ci).
 
@@ -109,7 +124,8 @@ and runs the Gradle build inside it. podman is preferred, docker is the fallback
 ```bash
 make help            # list targets and variables
 make image           # build the build-environment image (once; ~1.5 GB)
-make build/apk       # debug + release APKs -> dist/
+make build/apk       # debug + release APKs -> dist/ (fails if the VITURE SDK is missing)
+make build/apk VITURE=off   # stub APKs on purpose: no head tracking
 make build/apk-debug # or build/apk-release
 make test            # :glasses unit tests
 make shell           # interactive shell in the build environment
@@ -135,7 +151,10 @@ container, export `MAVEN_CENTRAL_URL` before running Gradle.
 - **VITURE SDK:** if `Android/libs/viture-sdk` (or the directory in `VITURE_SDK_DIR=...`)
   contains the SDK, it is bind-mounted **read-only** into the container and the build picks it
   up. It is never copied into the image or the build context, and never committed.
-  `make build/apk VITURE=off` forces the stub backend even when the SDK is present.
+  Without it `make build/apk` stops with an error instead of quietly producing a stub APK;
+  `make build/apk VITURE=off` builds the stub on purpose (also when the SDK is present).
+  After the build the entrypoint checks that the APK really contains (or, for a stub, does not
+  contain) `libglasses.so` and `libglasses_bridge.so`.
 - **The image is safe to share in the sense that it holds no VITURE SDK and no Glashutte source,**
   but it does bundle Google's Android SDK/NDK under Google's licence terms. Build it locally;
   do not push it to a public registry.
