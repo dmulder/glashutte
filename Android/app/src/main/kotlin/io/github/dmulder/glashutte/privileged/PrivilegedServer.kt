@@ -15,13 +15,19 @@ import android.os.RemoteException
 import android.os.SystemClock
 import android.util.Log
 import android.view.InputDevice
+import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.Surface
 import java.io.File
 import java.io.FileInputStream
 import java.io.IOException
+import io.github.dmulder.glashutte.glasses.DumpsysFilter
+import io.github.dmulder.glashutte.glasses.InjectOutcome
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
 import kotlin.system.exitProcess
 
 /**
@@ -47,6 +53,22 @@ class PrivilegedServer() : IPrivilegedService.Stub() {
 
     /** Trusted virtual displays created for the workspace, keyed by display id. */
     private val virtualDisplays = HashMap<Int, VirtualDisplay>()
+
+    /** Routes injected input to the platform dispatcher; see [InputInjector]. */
+    private val injector = InputInjector { baseContext() }
+
+    /** Give new displays their own window focus (diagnostics experiment, off by default). */
+    @Volatile private var ownFocusFlag = false
+
+    /** Recent injections and shell results, newest last, for [probe]. */
+    private val recent = java.util.ArrayDeque<String>()
+
+    private fun remember(line: String) {
+        synchronized(recent) {
+            recent.addLast("${SystemClock.uptimeMillis() % 1_000_000L} $line")
+            while (recent.size > RECENT_MAX) recent.removeFirst()
+        }
+    }
 
     /** Shizuku instantiates the user service with this constructor when a Context is available. */
     @Suppress("unused")
@@ -82,7 +104,8 @@ class PrivilegedServer() : IPrivilegedService.Stub() {
         }
         return try {
             val display = displayManager.createVirtualDisplay(
-                name, width, height, densityDpi, surface, TRUSTED_DISPLAY_FLAGS,
+                name, width, height, densityDpi, surface,
+                TRUSTED_DISPLAY_FLAGS or (if (ownFocusFlag) VIRTUAL_DISPLAY_FLAG_OWN_FOCUS else 0),
             )
             if (display == null) {
                 Log.e(TAG, "createVirtualDisplay returned null")
@@ -90,7 +113,8 @@ class PrivilegedServer() : IPrivilegedService.Stub() {
             }
             val id = display.display.displayId
             synchronized(virtualDisplays) { virtualDisplays[id] = display }
-            Log.i(TAG, "trusted virtual display created id=$id ${width}x$height '$name'")
+            Log.i(TAG, "trusted virtual display created id=$id ${width}x$height '$name' ownFocus=$ownFocusFlag")
+            remember("display created id=$id ${width}x$height ownFocus=$ownFocusFlag")
             id
         } catch (e: Exception) {
             Log.e(TAG, "createVirtualDisplay failed", e)
@@ -298,41 +322,33 @@ class PrivilegedServer() : IPrivilegedService.Stub() {
         durationMs: Int,
     ) {
         try {
-            val injector = obtainInjector() ?: run {
-                Log.e(TAG, "pinch: InputManager unavailable")
-                return
-            }
             val steps = (durationMs / PINCH_STEP_MS).coerceAtLeast(3)
             val downAt = SystemClock.uptimeMillis()
             // The two pointers move horizontally apart from / together to the centre.
-            fun pointAtStep(step: Int): Pair<FloatArray, FloatArray> {
+            fun pointsAtStep(step: Int): List<FloatArray> {
                 val t = step.toFloat() / steps
-                val span = fromSpan + (toSpan - fromSpan) * t
-                val half = span / 2f
-                return floatArrayOf(centerX - half, centerY.toFloat()) to
-                    floatArrayOf(centerX + half, centerY.toFloat())
+                val half = (fromSpan + (toSpan - fromSpan) * t) / 2f
+                return listOf(
+                    floatArrayOf(centerX - half, centerY.toFloat()),
+                    floatArrayOf(centerX + half, centerY.toFloat()),
+                )
             }
-            val (start0, start1) = pointAtStep(0)
-            injectMotionEvent(injector, displayId, downAt, downAt, MotionEvent.ACTION_DOWN,
-                start0, null)
-            injectMotionEvent(
-                injector, displayId, downAt, downAt,
-                MotionEvent.ACTION_POINTER_DOWN or (1 shl MotionEvent.ACTION_POINTER_INDEX_SHIFT),
-                start0, start1,
-            )
+            val secondDown = MotionEvent.ACTION_POINTER_DOWN or (1 shl MotionEvent.ACTION_POINTER_INDEX_SHIFT)
+            val secondUp = MotionEvent.ACTION_POINTER_UP or (1 shl MotionEvent.ACTION_POINTER_INDEX_SHIFT)
+            val start = pointsAtStep(0)
+            val first = injectPoints(displayId, downAt, downAt, MotionEvent.ACTION_DOWN, listOf(start[0]))
+            if (!first.ok) {
+                Log.w(TAG, "pinch: first injection failed: $first")
+                return
+            }
+            injectPoints(displayId, downAt, downAt, secondDown, start)
             for (step in 1..steps) {
-                val (p0, p1) = pointAtStep(step)
-                val t = downAt + step.toLong() * PINCH_STEP_MS
-                injectMotionEvent(injector, displayId, downAt, t, MotionEvent.ACTION_MOVE, p0, p1)
+                injectPoints(displayId, downAt, downAt + step.toLong() * PINCH_STEP_MS, MotionEvent.ACTION_MOVE, pointsAtStep(step))
             }
-            val (end0, end1) = pointAtStep(steps)
+            val end = pointsAtStep(steps)
             val finalT = downAt + steps.toLong() * PINCH_STEP_MS
-            injectMotionEvent(
-                injector, displayId, downAt, finalT,
-                MotionEvent.ACTION_POINTER_UP or (1 shl MotionEvent.ACTION_POINTER_INDEX_SHIFT),
-                end0, end1,
-            )
-            injectMotionEvent(injector, displayId, downAt, finalT, MotionEvent.ACTION_UP, end0, null)
+            injectPoints(displayId, downAt, finalT, secondUp, end)
+            injectPoints(displayId, downAt, finalT, MotionEvent.ACTION_UP, listOf(end[0]))
         } catch (t: Throwable) {
             Log.e(TAG, "pinch failed", t)
         }
@@ -427,158 +443,206 @@ class PrivilegedServer() : IPrivilegedService.Stub() {
     }
 
     override fun injectTouch(displayId: Int, x: Int, y: Int, action: Int) {
-        try {
-            val injector = obtainInjector() ?: run {
-                Log.e(TAG, "touch: InputManager unavailable")
-                return
-            }
-            val androidAction = when (action) {
-                0 -> MotionEvent.ACTION_DOWN
-                1 -> MotionEvent.ACTION_MOVE
-                2 -> MotionEvent.ACTION_UP
-                3 -> MotionEvent.ACTION_CANCEL
-                else -> {
-                    Log.e(TAG, "touch: unknown action $action")
-                    return
-                }
-            }
-            val now = SystemClock.uptimeMillis()
-            val downAt = if (androidAction == MotionEvent.ACTION_DOWN) {
-                touchDownAt[displayId] = now
-                now
-            } else {
-                touchDownAt[displayId] ?: now
-            }
-            val pt = floatArrayOf(x.toFloat(), y.toFloat())
-            val ok = injectMotionEvent(injector, displayId, downAt, now, androidAction, pt, null)
-            if (!ok) {
-                Log.w(TAG, "touch inject FAILED action=$androidAction display=$displayId at ($x,$y)")
-            }
-            if (androidAction == MotionEvent.ACTION_UP ||
-                androidAction == MotionEvent.ACTION_CANCEL) {
-                touchDownAt.remove(displayId)
-            }
-        } catch (t: Throwable) {
-            Log.e(TAG, "touch injection failed", t)
-        }
+        injectTouchEx(displayId, x, y, action)
     }
 
     /** Per-display down timestamp for a streamed touch sequence. */
     private val touchDownAt = mutableMapOf<Int, Long>()
 
     /**
-     * Inject a one-shot ACTION_SCROLL motion event on the target display — mouse-wheel
-     * equivalent, fast, no synthesized touch swipe. Same shape as `UiScreen.dispatchScroll`,
-     * routed through `InputManager.injectInputEvent` so the event lands on an
-     * out-of-process VirtualDisplay.
+     * Streamed touch injection: one DOWN / MOVE / UP / CANCEL motion event at a time on the
+     * target display. The down timestamp is latched on `DOWN` and reused for the rest of the
+     * sequence, so the app sees a coherent gesture (required by Android's input dispatching).
+     * Returns the encoded [InjectOutcome].
      */
-    override fun injectScroll(displayId: Int, x: Int, y: Int, vScroll: Float) {
-        try {
-            val injector = obtainInjector() ?: run {
-                Log.e(TAG, "scroll: InputManager unavailable")
-                return
+    override fun injectTouchEx(displayId: Int, x: Int, y: Int, action: Int): String {
+        val name = when (action) { 0 -> "DOWN"; 1 -> "MOVE"; 2 -> "UP"; 3 -> "CANCEL"; else -> "?$action" }
+        val outcome = guarded {
+            val androidAction = when (action) {
+                0 -> MotionEvent.ACTION_DOWN
+                1 -> MotionEvent.ACTION_MOVE
+                2 -> MotionEvent.ACTION_UP
+                3 -> MotionEvent.ACTION_CANCEL
+                else -> return@guarded InjectOutcome(InjectOutcome.BAD_ARGS, "", "unknown touch action $action")
             }
             val now = SystemClock.uptimeMillis()
-            val props = arrayOf(
-                MotionEvent.PointerProperties().apply {
-                    id = 0
-                    toolType = MotionEvent.TOOL_TYPE_MOUSE
-                },
-            )
-            val coords = arrayOf(
-                MotionEvent.PointerCoords().apply {
-                    this.x = x.toFloat()
-                    this.y = y.toFloat()
-                    setAxisValue(MotionEvent.AXIS_VSCROLL, vScroll)
-                },
-            )
-            val event = MotionEvent.obtain(
-                now, now, MotionEvent.ACTION_SCROLL, 1, props, coords,
-                0, 0, 1f, 1f, 0, 0,
-                InputDevice.SOURCE_MOUSE, 0,
-            )
-            event.source = InputDevice.SOURCE_MOUSE
-            runCatching {
-                event.javaClass.getMethod("setDisplayId", Int::class.javaPrimitiveType)
-                    .invoke(event, displayId)
+            val downAt = synchronized(touchDownAt) {
+                if (androidAction == MotionEvent.ACTION_DOWN) {
+                    touchDownAt[displayId] = now
+                    now
+                } else {
+                    touchDownAt[displayId] ?: now
+                }
             }
-            val injectMethod = injector.javaClass.getMethod(
-                "injectInputEvent",
-                android.view.InputEvent::class.java,
-                Int::class.javaPrimitiveType,
-            )
-            // 0 = INJECT_INPUT_EVENT_MODE_ASYNC.
-            injectMethod.invoke(injector, event, 0)
-            event.recycle()
-        } catch (t: Throwable) {
-            Log.e(TAG, "scroll failed", t)
+            val result = if (injector.strategy == SHELL_STRATEGY) {
+                shellTouch(displayId, name, x, y)
+            } else {
+                injectPoints(displayId, downAt, now, androidAction, listOf(floatArrayOf(x.toFloat(), y.toFloat())))
+            }
+            if (androidAction == MotionEvent.ACTION_UP || androidAction == MotionEvent.ACTION_CANCEL) {
+                synchronized(touchDownAt) { touchDownAt.remove(displayId) }
+            }
+            result
         }
+        if (name != "MOVE" || !outcome.ok) remember("touch $name display=$displayId ($x,$y) -> $outcome")
+        return outcome.encode()
     }
 
-    /** Build and submit one frame of the pinch — one or two pointers. Returns the
-     *  injectInputEvent boolean — true means the event was accepted by the dispatcher. */
-    private fun injectMotionEvent(
-        injector: Any,
+    private fun shellTouch(displayId: Int, actionName: String, x: Int, y: Int): InjectOutcome {
+        if (actionName == "CANCEL") return InjectOutcome.ok("shell-input", "cancel is a no-op")
+        return runOutcome("shell-input", "input", "-d", displayId.toString(), "motionevent", actionName, x.toString(), y.toString())
+    }
+
+    /**
+     * Inject an ACTION_SCROLL motion event on the target display — mouse-wheel equivalent,
+     * fast, no synthesized touch swipe.
+     */
+    override fun injectScroll(displayId: Int, x: Int, y: Int, vScroll: Float) {
+        injectScrollEx(displayId, x, y, vScroll)
+    }
+
+    override fun injectScrollEx(displayId: Int, x: Int, y: Int, vScroll: Float): String {
+        val outcome = guarded {
+            if (injector.strategy == SHELL_STRATEGY) {
+                return@guarded InjectOutcome(InjectOutcome.BAD_ARGS, "shell-input", "the shell strategy cannot send scroll events")
+            }
+            val now = SystemClock.uptimeMillis()
+            val built = InputInjector.motion(
+                displayId, now, now, MotionEvent.ACTION_SCROLL,
+                listOf(floatArrayOf(x.toFloat(), y.toFloat())),
+                InputDevice.SOURCE_MOUSE, MotionEvent.TOOL_TYPE_MOUSE, vScroll,
+            )
+            val event = built.event ?: return@guarded InjectOutcome(InjectOutcome.BAD_ARGS, "", built.error.orEmpty())
+            try { injector.inject(event) } finally { InputInjector.recycle(event) }
+        }
+        if (!outcome.ok) remember("scroll display=$displayId ($x,$y) -> $outcome")
+        return outcome.encode()
+    }
+
+    override fun injectKeyEx(displayId: Int, keyCode: Int, action: Int, metaState: Int): String {
+        val outcome = guarded {
+            if (injector.strategy == SHELL_STRATEGY) {
+                return@guarded if (action == KeyEvent.ACTION_DOWN) {
+                    runOutcome("shell-input", "input", "-d", displayId.toString(), "keyevent", keyCode.toString())
+                } else {
+                    InjectOutcome.ok("shell-input", "up folded into the down")
+                }
+            }
+            val downAt = synchronized(keyDownAt) {
+                if (action == KeyEvent.ACTION_DOWN) {
+                    SystemClock.uptimeMillis().also { keyDownAt[keyCode] = it }
+                } else {
+                    keyDownAt.remove(keyCode) ?: SystemClock.uptimeMillis()
+                }
+            }
+            val built = InputInjector.key(displayId, downAt, action, keyCode, metaState)
+            val event = built.event ?: return@guarded InjectOutcome(InjectOutcome.BAD_ARGS, "", built.error.orEmpty())
+            injector.inject(event)
+        }
+        remember("key ${KeyEvent.keyCodeToString(keyCode)} ${if (action == 0) "down" else "up"} meta=0x${Integer.toHexString(metaState)} display=$displayId -> $outcome")
+        return outcome.encode()
+    }
+
+    private val keyDownAt = mutableMapOf<Int, Long>()
+
+    override fun keyEx(displayId: Int, keyCode: Int): String {
+        val outcome = guarded { runOutcome("shell-input", "input", "-d", displayId.toString(), "keyevent", keyCode.toString()) }
+        remember("keyevent $keyCode display=$displayId -> $outcome")
+        return outcome.encode()
+    }
+
+    override fun textEx(displayId: Int, value: String): String {
+        val outcome = guarded { runOutcome("shell-input", "input", "-d", displayId.toString(), "text", value) }
+        remember("text(${value.length} chars) display=$displayId -> $outcome")
+        return outcome.encode()
+    }
+
+    override fun setInputConfig(strategy: Int, waitForResult: Boolean, ownFocus: Boolean) {
+        injector.strategy = strategy
+        injector.waitForResult = waitForResult
+        ownFocusFlag = ownFocus
+        Log.i(TAG, "input config: strategy=$strategy waitForResult=$waitForResult ownFocus=$ownFocus")
+        remember("config strategy=$strategy waitForResult=$waitForResult ownFocus=$ownFocus")
+    }
+
+    private fun injectPoints(
         displayId: Int,
         downAt: Long,
         eventAt: Long,
         action: Int,
-        p0: FloatArray,
-        p1: FloatArray?,
-    ): Boolean {
-        val count = if (p1 == null) 1 else 2
-        val props = Array(count) { idx ->
-            MotionEvent.PointerProperties().apply {
-                id = idx
-                toolType = MotionEvent.TOOL_TYPE_FINGER
-            }
-        }
-        val coords = Array(count) { idx ->
-            val src = if (idx == 0) p0 else p1!!
-            MotionEvent.PointerCoords().apply {
-                x = src[0]
-                y = src[1]
-                pressure = 1f
-                size = 1f
-            }
-        }
-        val event = MotionEvent.obtain(
-            downAt, eventAt, action, count, props, coords,
-            0, 0, 1f, 1f, 0, 0,
-            InputDevice.SOURCE_TOUCHSCREEN, 0,
+        points: List<FloatArray>,
+    ): InjectOutcome {
+        val built = InputInjector.motion(
+            displayId, downAt, eventAt, action, points,
+            InputDevice.SOURCE_TOUCHSCREEN, MotionEvent.TOOL_TYPE_FINGER,
         )
-        event.source = InputDevice.SOURCE_TOUCHSCREEN
-        // MotionEvent has setDisplayId since API 30 (hidden in some versions). Read it
-        // back so we can tell if the reflection silently failed — that would route the
-        // event to display 0 (the phone screen) instead of the virtual display.
-        val setOk = runCatching {
-            event.javaClass.getMethod("setDisplayId", Int::class.javaPrimitiveType)
-                .invoke(event, displayId)
-        }.isSuccess
-        val actualDisplayId = runCatching {
-            event.javaClass.getMethod("getDisplayId").invoke(event) as? Int
-        }.getOrNull() ?: -1
-        if (!setOk || actualDisplayId != displayId) {
-            Log.w(TAG, "displayId mismatch: setOk=$setOk wanted=$displayId got=$actualDisplayId")
-        }
-        val injectMethod = injector.javaClass.getMethod(
-            "injectInputEvent",
-            android.view.InputEvent::class.java,
-            Int::class.javaPrimitiveType,
-        )
-        // 0 = INJECT_INPUT_EVENT_MODE_ASYNC. Returns Boolean — false means the
-        // dispatcher rejected the event (permission, no window, wrong display, …).
-        val result = injectMethod.invoke(injector, event, 0)
-        event.recycle()
-        return (result as? Boolean) ?: false
+        val event = built.event ?: return InjectOutcome(InjectOutcome.BAD_ARGS, "", built.error.orEmpty())
+        return try { injector.inject(event) } finally { InputInjector.recycle(event) }
     }
 
-    /** `InputManager.getInstance()` or, on newer Android, an equivalent service-hosted singleton. */
-    private fun obtainInjector(): Any? {
-        return runCatching {
-            val cls = Class.forName("android.hardware.input.InputManager")
-            cls.getMethod("getInstance").invoke(null)
-        }.onFailure { Log.w(TAG, "InputManager.getInstance() failed: ${it.message}") }.getOrNull()
+    private inline fun guarded(block: () -> InjectOutcome): InjectOutcome =
+        try {
+            block()
+        } catch (t: Throwable) {
+            Log.e(TAG, "input injection failed", t)
+            InjectOutcome(InjectOutcome.EXCEPTION, "", "${t.javaClass.simpleName}: ${t.message}")
+        }
+
+    /** Run a shell command and fold its exit code and output into an [InjectOutcome]. */
+    private fun runOutcome(strategy: String, vararg command: String): InjectOutcome =
+        try {
+            val process = Runtime.getRuntime().exec(command)
+            val out = (process.inputStream.bufferedReader().readText() + process.errorStream.bufferedReader().readText()).trim()
+            val exit = process.waitFor()
+            if (exit == 0) {
+                InjectOutcome.ok(strategy, out.take(80))
+            } else {
+                InjectOutcome(InjectOutcome.EXCEPTION, strategy, "exit $exit: ${out.take(160)}")
+            }
+        } catch (e: Exception) {
+            InjectOutcome(InjectOutcome.EXCEPTION, strategy, "${e.javaClass.simpleName}: ${e.message}")
+        }
+
+    /**
+     * What this helper can see and do, as text plus one machine-readable `STATS` line. Shown in
+     * the Diagnostics screen and included in the Share log.
+     */
+    override fun probe(): String = try {
+        val sb = StringBuilder()
+        sb.append("uid=").append(Process.myUid()).append(" pid=").append(Process.myPid())
+            .append(" sdk=").append(Build.VERSION.SDK_INT).append(" release=").append(Build.VERSION.RELEASE)
+            .append(" build=").append(Build.ID).append(" device=").append(Build.MODEL).append('\n')
+        sb.append(injector.describe()).append('\n')
+        val displays = synchronized(virtualDisplays) { virtualDisplays.values.map { it.display.toString() } }
+        sb.append("virtual displays: ").append(displays.size).append('\n')
+        displays.forEach { sb.append("  ").append(it).append('\n') }
+        sb.append("raw-input monitor: ").append(if (hotkeyMonitor != null) "on" else "off").append('\n')
+        HelperStats.describe(sb)
+        sb.append("recent helper activity (newest last):\n")
+        synchronized(recent) { recent.forEach { sb.append("  ").append(it).append('\n') } }
+        sb.append("STATS monitor=").append(if (hotkeyMonitor != null) "on" else "off")
+            .append(" opened=").append(HelperStats.opened.size)
+            .append(" grabbed=").append(HelperStats.grabbed.values.count { it == "ok" })
+            .append(" keys=").append(HelperStats.keys.get())
+            .append(" rel=").append(HelperStats.rel.get())
+            .append(" btn=").append(HelperStats.btn.get())
+            .append(" skipped=").append(HelperStats.skipped.entries.joinToString(",") { "${it.key}:${it.value}" }.ifEmpty { "none" })
+            .append(" route=").append(if (injector.anyRoute()) "ok" else "none")
+            .append('\n')
+        sb.toString()
+    } catch (t: Throwable) {
+        "probe failed: ${t.javaClass.simpleName}: ${t.message}\nSTATS monitor=unknown"
+    }
+
+    override fun describeDisplay(displayId: Int): String = try {
+        val input = DumpsysFilter.forDisplay(runCapture("dumpsys", "input"), displayId, 60)
+        val activities = DumpsysFilter.forDisplay(runCapture("dumpsys", "activity", "activities"), displayId, 40)
+        val display = DumpsysFilter.forDisplay(runCapture("dumpsys", "display"), displayId, 25)
+        "--- dumpsys input (display $displayId) ---\n$input\n" +
+            "--- dumpsys activity activities (display $displayId) ---\n$activities\n" +
+            "--- dumpsys display (display $displayId) ---\n$display"
+    } catch (t: Throwable) {
+        "describeDisplay failed: ${t.javaClass.simpleName}: ${t.message}"
     }
 
     /**
@@ -663,6 +727,7 @@ class PrivilegedServer() : IPrivilegedService.Stub() {
         private var fileObserver: FileObserver? = null
 
         fun start() {
+            HelperStats.reset()
             val inputDir = File(INPUT_DIR)
             inputDir.listFiles { f -> f.name.startsWith("event") }?.forEach(::spawnReader)
             fileObserver = newFileObserver(inputDir).also { it.startWatching() }
@@ -701,11 +766,15 @@ class PrivilegedServer() : IPrivilegedService.Stub() {
                 // Most event devices are readable by shell uid via the `input` group;
                 // a handful (e.g. accelerometer) may be locked down. Skip silently.
                 Log.d(TAG, "hotkey: skip ${dev.name} (${e.message})")
+                HelperStats.skipped[dev.name] = (e.message ?: e.javaClass.simpleName)
+                    .substringAfterLast('(').trimEnd(')').take(24).replace(' ', '_').replace(',', ';')
                 return
             }
             // Logged at INFO so the user can correlate keyboard attach with
             // any downstream USB / DOF disturbance in a single logcat scroll.
-            Log.i(TAG, "hotkey: opened ${dev.name} (${describeInputDevice(dev.name)})")
+            val deviceName = describeInputDevice(dev.name)
+            HelperStats.opened[dev.name] = deviceName
+            Log.i(TAG, "hotkey: opened ${dev.name} ($deviceName)")
             // Mice (devices that report EV_REL relative motion) get EVIOCGRAB'd so
             // system_server stops seeing them. Without the grab, clicks land on
             // whatever phone UI sits under the (hidden) system pointer — the home
@@ -831,6 +900,7 @@ class PrivilegedServer() : IPrivilegedService.Stub() {
                         "hotkey: no ioctlInt on ${os.javaClass.name} — ioctl-like methods: [$ioctlLike]",
                     )
                     Log.w(TAG, "hotkey: EVIOCGRAB unavailable for $devName — system pointer will still roam")
+                    HelperStats.grabbed[devName] = "no-ioctlInt"
                     return
                 }
                 // Build args positionally by parameter type: the FileDescriptor, the
@@ -847,6 +917,7 @@ class PrivilegedServer() : IPrivilegedService.Stub() {
                     }
                 }.toTypedArray()
                 ioctlInt.invoke(os, *args)
+                HelperStats.grabbed[devName] = "ok"
                 Log.i(
                     TAG,
                     "hotkey: EVIOCGRAB ok for $devName via " +
@@ -854,6 +925,7 @@ class PrivilegedServer() : IPrivilegedService.Stub() {
                 )
             } catch (t: Throwable) {
                 Log.w(TAG, "hotkey: EVIOCGRAB failed for $devName: ${t.message}")
+                HelperStats.grabbed[devName] = "failed:${t.javaClass.simpleName}"
             }
         }
 
@@ -887,6 +959,9 @@ class PrivilegedServer() : IPrivilegedService.Stub() {
                         read += n
                     }
                     handle(buf)
+                    // Only count motion from nodes already proven to be pointers: some sensors
+                    // on phones emit REL_X continuously and would make the counter meaningless.
+                    if (motionGrabbed && u16le(buf, OFFSET_TYPE) == EV_REL) HelperStats.rel.incrementAndGet()
                     if (pointerProbe != null && !motionGrabbed && pointerProbe.observe(
                             u16le(buf, OFFSET_TYPE), u16le(buf, OFFSET_CODE), i32le(buf, OFFSET_VALUE),
                         )
@@ -966,12 +1041,17 @@ class PrivilegedServer() : IPrivilegedService.Stub() {
             // autorepeat which mice don't really emit but skip just in case.
             if (code == BTN_LEFT || code == BTN_RIGHT || code == BTN_MIDDLE) {
                 if (value != 0 && value != 1) return
+                HelperStats.btn.incrementAndGet()
                 try {
                     listener.onMouseButton(code, value == 1)
                 } catch (_: RemoteException) {
                     stop()
                 }
                 return
+            }
+            if (value == 1) {
+                HelperStats.keys.incrementAndGet()
+                HelperStats.lastKey.set(code)
             }
             when (code) {
                 KEY_LEFTCTRL, KEY_RIGHTCTRL -> {
@@ -1132,6 +1212,14 @@ class PrivilegedServer() : IPrivilegedService.Stub() {
          * receives a power-on), which kills rendering entirely. Don't combine them again.
          */
         private const val VIRTUAL_DISPLAY_FLAG_TRUSTED = 1 shl 10
+
+        /** `VIRTUAL_DISPLAY_FLAG_OWN_FOCUS` (hidden, 1 << 14). */
+        private const val VIRTUAL_DISPLAY_FLAG_OWN_FOCUS = 1 shl 14
+
+        private const val RECENT_MAX = 30
+
+        /** [io.github.dmulder.glashutte.glasses.InputExperiments.Strategy.SHELL_INPUT] wire value. */
+        private const val SHELL_STRATEGY = 5
         private const val TRUSTED_DISPLAY_FLAGS =
             DisplayManager.VIRTUAL_DISPLAY_FLAG_PUBLIC or
                 DisplayManager.VIRTUAL_DISPLAY_FLAG_OWN_CONTENT_ONLY or
@@ -1327,5 +1415,34 @@ class PrivilegedServer() : IPrivilegedService.Stub() {
             }
             stringCall.invoke(provider, *args)
         }
+    }
+}
+
+/** Counters from the helper's raw `/dev/input` monitor, reported through `probe()`. */
+internal object HelperStats {
+    val opened = ConcurrentHashMap<String, String>()
+    val grabbed = ConcurrentHashMap<String, String>()
+    val skipped = ConcurrentHashMap<String, String>()
+    val keys = AtomicLong()
+    val rel = AtomicLong()
+    val btn = AtomicLong()
+    val lastKey = AtomicInteger(-1)
+
+    fun reset() {
+        opened.clear(); grabbed.clear(); skipped.clear()
+        keys.set(0); rel.set(0); btn.set(0); lastKey.set(-1)
+    }
+
+    fun describe(sb: StringBuilder) {
+        sb.append("raw-input devices opened: ").append(opened.size).append('\n')
+        opened.entries.sortedBy { it.key }.forEach { sb.append("  ").append(it.key).append(' ').append(it.value).append('\n') }
+        if (skipped.isNotEmpty()) {
+            sb.append("raw-input nodes skipped: ").append(skipped.entries.joinToString { "${it.key}=${it.value}" }).append('\n')
+        }
+        sb.append("pointer grabs: ")
+            .append(if (grabbed.isEmpty()) "none yet (a mouse is grabbed on its first motion)" else grabbed.entries.joinToString { "${it.key}=${it.value}" })
+            .append('\n')
+        sb.append("raw events seen: keyPresses=").append(keys.get()).append(" relMotion=").append(rel.get())
+            .append(" mouseButtons=").append(btn.get()).append(" lastKeyScancode=").append(lastKey.get()).append('\n')
     }
 }

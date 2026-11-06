@@ -89,4 +89,43 @@ interface IPrivilegedService {
      * Idempotent — silent no-op when no VITURE device is present.
      */
     void rescanGlassesUsb() = 15;
+
+    // --- Diagnostics-friendly variants (ids 16+). These return an encoded InjectOutcome,
+    // "<code>\t<strategy>\t<detail>" (see glasses InjectOutcome), instead of swallowing the
+    // result, so the app can show exactly why an event did not reach an app.
+
+    /** Like injectTouch, but reports whether the dispatcher accepted the event. */
+    String injectTouchEx(int displayId, int x, int y, int action) = 16;
+
+    /** Like injectScroll, but reports whether the dispatcher accepted the event. */
+    String injectScrollEx(int displayId, int x, int y, float vScroll) = 17;
+
+    /**
+     * Inject one KeyEvent (action 0 = down, 1 = up; metaState = KeyEvent.META_*) on the
+     * display, so shifted letters and modifier combinations from a physical keyboard arrive intact.
+     */
+    String injectKeyEx(int displayId, int keyCode, int action, int metaState) = 18;
+
+    /** Like key, but reports the `input` command's result. */
+    String keyEx(int displayId, int keyCode) = 19;
+
+    /** Like text, but reports the `input` command's result. */
+    String textEx(int displayId, String value) = 20;
+
+    /**
+     * Self-report of the helper: uid, Android build, which InputManager routes resolve, recent
+     * injections and shell commands, the display list, and the raw-input monitor's counters
+     * (STATS line). Safe to call at any time; never throws.
+     */
+    String probe() = 21;
+
+    /** `dumpsys input` / `dumpsys window` excerpts for one display: windows, focus, touchable regions. */
+    String describeDisplay(int displayId) = 22;
+
+    /**
+     * Input behaviour switches chosen on the diagnostics screen: strategy (0 auto, 1 service
+     * context, 2 InputManagerGlobal, 3 legacy getInstance, 4 IInputManager binder, 5 shell
+     * input), wait for the dispatcher's result, and whether new displays get OWN_FOCUS.
+     */
+    void setInputConfig(int strategy, boolean waitForResult, boolean ownFocus) = 23;
 }
