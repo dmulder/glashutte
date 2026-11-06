@@ -146,6 +146,7 @@ class HeadTracking(
         if (!autoRestartScheduled) autoRetryCount = 0
         GlassesDiagnostics.i(TAG, "found glasses, pid=0x${device.productId.toString(16)}")
         GlassesDiagnostics.put("usb.pid", "0x${device.productId.toString(16)}")
+        PanelSpecs.activeUsbPid = device.productId
         GlassesDiagnostics.put("usb.productName", runCatching { device.productName }.getOrNull())
         GlassesDiagnostics.stage(
             GlassesDiagnostics.Stage.USB_DEVICE, GlassesDiagnostics.Status.OK,

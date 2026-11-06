@@ -13,6 +13,7 @@ import android.opengl.GLSurfaceView
 import android.opengl.GLUtils
 import android.opengl.Matrix
 import android.os.Handler
+import android.os.SystemClock
 import android.util.Log
 import android.widget.Toast
 import java.io.File
@@ -24,6 +25,11 @@ import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 import javax.microedition.khronos.egl.EGLConfig
+import io.github.dmulder.glashutte.glasses.GlassesDiagnostics
+import io.github.dmulder.glashutte.glasses.PanelSpec
+import io.github.dmulder.glashutte.glasses.PanelSpecs
+import io.github.dmulder.glashutte.glasses.ProjectionExperiments
+import io.github.dmulder.glashutte.glasses.ProjectionMath
 import javax.microedition.khronos.opengles.GL10
 import kotlin.math.abs
 
@@ -358,6 +364,21 @@ class WorkspaceRenderer(
     private var desktopHalfWidth = 3.7f
     private var desktopHalfHeight = 2.1f
 
+    // --- projection calibration (see [applyBand], [ProjectionExperiments]) -----------------
+    /** Vertical FOV of the current projection, degrees. */
+    private var fovYDegrees = FOV_Y_DEGREES
+
+    /**
+     * X/Y scale folded into viewProjection when zoom is applied to the world rather than the
+     * projection (calibrated projection, FREE view); 1 otherwise.
+     */
+    private var worldZoomScale = 1f
+    private var appliedCalibrated: Boolean? = null
+    private var appliedPanelPid: Int? = null
+    private var lastProjectionSummary = ""
+    private var lastProjectionLogMs = 0L
+    private var lastProjectionKey = ""
+
     private lateinit var screenQuad: FloatBuffer
     private lateinit var cursorArrow: FloatBuffer
     private lateinit var scrimQuad: FloatBuffer
@@ -606,7 +627,7 @@ class WorkspaceRenderer(
             var chosenIdx = -1
             var bestScore = 0f
             layout.screens.forEachIndexed { i, screen ->
-                val rr = Screen.worldRect(screen, desktopHalfWidth, desktopHalfHeight)
+                val rr = scaledWorldRect(screen)
                 val d2 = rr[0] * rr[0] + rr[1] * rr[1] + rr[2] * rr[2]
                 if (d2 < 1e-4f) return@forEachIndexed
                 val cosA = (fwdX * rr[0] + fwdY * rr[1] + fwdZ * rr[2]) /
@@ -620,7 +641,7 @@ class WorkspaceRenderer(
                 chosenIdx = WorkspaceController.mainScreenIdx()
                     .coerceIn(0, layout.screens.size - 1)
             }
-            val r = Screen.worldRect(layout.screens[chosenIdx], desktopHalfWidth, desktopHalfHeight)
+            val r = scaledWorldRect(layout.screens[chosenIdx])
             val cx = r[0]; val cy = r[1]; val cz = r[2]
             // Look-rotation that aims world-forward (−Z) at the screen centre with no roll:
             // yaw about world Y to the screen's azimuth, then pitch about X to its elevation.
@@ -948,6 +969,57 @@ class WorkspaceRenderer(
         bandDirty = true
     }
 
+    /** [Screen.worldRect] as drawn: X/Y centre and size scaled by [worldZoomScale]. */
+    private fun scaledWorldRect(screen: Screen): FloatArray {
+        val r = Screen.worldRect(screen, desktopHalfWidth, desktopHalfHeight)
+        val s = worldZoomScale
+        return floatArrayOf(r[0] * s, r[1] * s, r[2], r[3] * s, r[4] * s)
+    }
+
+    private fun projectionSummary(
+        panel: PanelSpec,
+        viewportH: Int,
+        calibrated: Boolean,
+        projectionZoom: Float,
+        rawZoom: Float,
+    ): String {
+        val gain = ProjectionMath.centreGain(
+            panel, surfaceWidth, viewportH, fovYDegrees.toDouble(), projectionZoom.toDouble(),
+        )
+        val aspectNote =
+            if (ProjectionMath.surfaceMatchesPanel(panel, surfaceWidth, surfaceHeight)) "" else " SURFACE-ASPECT-MISMATCH"
+        return "projection ${if (calibrated) "CALIBRATED" else "LEGACY"} " +
+            "panel=${panel.name}(${PanelSpecs.activeSource()}) ${panel.widthPx}x${panel.heightPx}@" +
+            "${"%.1f".format(panel.diagonalFovDeg)}degDiag " +
+            "surface=${surfaceWidth}x$surfaceHeight viewportH=$viewportH$aspectNote " +
+            "fovY=${"%.2f".format(fovYDegrees)} view=$viewMode zoom=${"%.2f".format(rawZoom)} " +
+            "zoomOn=${if (worldZoomScale != 1f) "world" else "projection"} " +
+            "centreGain=${"%.2f".format(gain)}"
+    }
+
+    private fun logProjection(panel: PanelSpec, viewportH: Int, calibrated: Boolean, projectionZoom: Float, rawZoom: Float) {
+        val summary = projectionSummary(panel, viewportH, calibrated, projectionZoom, rawZoom)
+        lastProjectionSummary = summary
+        GlassesDiagnostics.put("projection", summary)
+        // A pinch re-enters here every frame; log immediately only when the setting itself
+        // (mode, panel, view, surface) changes, and leave zoom-only updates to the heartbeat.
+        val key = "$calibrated|${panel.name}|${PanelSpecs.activeSource()}|$viewMode|$surfaceWidth|$surfaceHeight|$viewportH"
+        if (key != lastProjectionKey) {
+            lastProjectionKey = key
+            Log.i(GlassesDiagnostics.TAG, summary)
+            lastProjectionLogMs = SystemClock.uptimeMillis()
+        }
+    }
+
+    /** Re-state the active projection setting every few seconds so it stays in captured logs. */
+    private fun heartbeatProjection() {
+        val now = SystemClock.uptimeMillis()
+        if (lastProjectionSummary.isEmpty() || now - lastProjectionLogMs < PROJECTION_LOG_INTERVAL_MS) return
+        lastProjectionLogMs = now
+        GlassesDiagnostics.put("projection", lastProjectionSummary)
+        Log.i(GlassesDiagnostics.TAG, lastProjectionSummary)
+    }
+
     /**
      * Apply the render band — a centred 16:9 viewport sized to the band fraction. 16:9 is the
      * comfortable screen shape and matches the desktop and app surfaces. GL thread only.
@@ -967,7 +1039,19 @@ class WorkspaceRenderer(
         GLES20.glViewport((surfaceWidth - areaW) / 2, (surfaceHeight - areaH) / 2, areaW, areaH)
 
         surfaceAspect = areaW.toFloat() / areaH.toFloat()
-        Matrix.perspectiveM(projection, 0, FOV_Y_DEGREES, surfaceAspect, NEAR_PLANE, FAR_PLANE)
+        val calibrated = ProjectionExperiments.calibratedProjection(appContext)
+        val panel = PanelSpecs.active()
+        appliedCalibrated = calibrated
+        appliedPanelPid = PanelSpecs.activeUsbPid
+        // Calibrated: give each viewport pixel the angle it subtends on the real panel, so a
+        // world-locked point moves across the display by the angle the head turned. Legacy: a
+        // fixed FOV unrelated to the optics.
+        fovYDegrees = if (calibrated) {
+            ProjectionMath.viewportVerticalFovDeg(panel, surfaceWidth, areaH).toFloat()
+        } else {
+            FOV_Y_DEGREES
+        }
+        Matrix.perspectiveM(projection, 0, fovYDegrees, surfaceAspect, NEAR_PLANE, FAR_PLANE)
         // Pinch zoom on top — scale projection X/Y to magnify around the saved cursor
         // anchor for the active view mode. NDC math: x_ndc = zoom * x_ndc_orig + tx.
         //   projection[0,5] *= rawZoom .......... scales NDC around (0,0)
@@ -975,22 +1059,37 @@ class WorkspaceRenderer(
         // rawZoom = displayedZoom × layout.zoomBaseScale — the per-layout multiplier
         // hides the fact that some presets (Wide, V) have smaller default world-size, so
         // the displayed % means the same visual scale across all presets.
+        //
+        // Calibrated + FREE: the projection is left at the real optics and the same factor
+        // scales the scene in X/Y instead (see [onDrawFrame]), so zoom enlarges the virtual
+        // displays without changing how far they move per degree of head rotation. The saved
+        // pinch anchor (tx, ty) is a projection-space offset, so it is not used there.
         val rawZoom = activeZoom() * layout.zoomBaseScale
-        val tx = activeTx()
-        val ty = activeTy()
-        projection[0] *= rawZoom
-        projection[5] *= rawZoom
+        val decoupleZoom = calibrated && viewMode == ViewMode.FREE
+        val projectionZoom = if (decoupleZoom) 1f else rawZoom
+        worldZoomScale = if (decoupleZoom) rawZoom else 1f
+        val tx = if (decoupleZoom) 0f else activeTx()
+        val ty = if (decoupleZoom) 0f else activeTy()
+        projection[0] *= projectionZoom
+        projection[5] *= projectionZoom
         projection[8] = -tx
         projection[9] = -ty
+        logProjection(panel, areaH, calibrated, projectionZoom, rawZoom)
 
         // Size the desktop quad to exactly fill the field of view at its distance.
-        val halfFov = Math.toRadians(FOV_Y_DEGREES / 2.0)
+        val halfFov = Math.toRadians(fovYDegrees / 2.0)
         desktopHalfHeight = (DESKTOP_DISTANCE * Math.tan(halfFov)).toFloat()
         desktopHalfWidth = desktopHalfHeight * surfaceAspect
     }
 
     override fun onDrawFrame(gl: GL10?) {
-        if (bandDirty) applyBand()
+        if (bandDirty ||
+            appliedCalibrated != ProjectionExperiments.calibratedProjection(appContext) ||
+            appliedPanelPid != PanelSpecs.activeUsbPid
+        ) {
+            applyBand()
+        }
+        heartbeatProjection()
         drainGlTasks()
         drainPendingApps()
 
@@ -999,6 +1098,11 @@ class WorkspaceRenderer(
 
         buildView(viewMatrix)
         Matrix.multiplyMM(viewProjection, 0, projection, 0, viewMatrix, 0)
+        if (worldZoomScale != 1f) {
+            // Scene-space scale, applied before the head rotation. Everything that unprojects
+            // through viewProjection (cursor, hit tests) stays in unscaled layout coordinates.
+            Matrix.scaleM(viewProjection, 0, worldZoomScale, worldZoomScale, 1f)
+        }
 
         GLES20.glUseProgram(screenProgram)
 
@@ -2960,8 +3064,9 @@ class WorkspaceRenderer(
         var bestDist = Float.POSITIVE_INFINITY
         screens.forEachIndexed { i, screen ->
             val r = Screen.worldRect(screen, desktopHalfWidth, desktopHalfHeight)
-            val dx = r[0] - hitX
-            val dy = r[1] - hitY
+            // The head ray hits the scene as drawn (scaled by the FREE-view zoom); compare in that space.
+            val dx = r[0] * worldZoomScale - hitX
+            val dy = r[1] * worldZoomScale - hitY
             val d = dx * dx + dy * dy
             if (d < bestDist) {
                 bestDist = d; bestIdx = i; bestScreenX = r[0]; bestScreenY = r[1]
@@ -2970,7 +3075,7 @@ class WorkspaceRenderer(
         // Project screen centre to NDC under the current PINNED zoom (no translation yet) —
         // then set pinnedTx/Ty so x_ndc' = pinnedZoom * x_ndc_orig + tx = 0.
         // Using the FOV math: x_ndc_orig = (cot(fov/2)/aspect) * x_world / |z_world|.
-        val halfFov = Math.toRadians(FOV_Y_DEGREES / 2.0)
+        val halfFov = Math.toRadians(fovYDegrees / 2.0)
         val cot = (1.0 / Math.tan(halfFov)).toFloat()
         val ndcX = cot / surfaceAspect * bestScreenX / Screen.SCREEN_DISTANCE
         val ndcY = cot * bestScreenY / Screen.SCREEN_DISTANCE
@@ -4047,6 +4152,9 @@ class WorkspaceRenderer(
         )
 
         const val FOV_Y_DEGREES = 55f
+
+        /** How often the active projection setting is re-logged under `GlashutteDiag`. */
+        const val PROJECTION_LOG_INTERVAL_MS = 5000L
         const val NEAR_PLANE = 0.1f
         const val FAR_PLANE = 100f
 

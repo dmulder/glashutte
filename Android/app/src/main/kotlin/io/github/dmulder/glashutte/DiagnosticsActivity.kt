@@ -29,6 +29,7 @@ import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import io.github.dmulder.glashutte.glasses.GlassesDiagnostics
 import io.github.dmulder.glashutte.glasses.GlassesUsb
+import io.github.dmulder.glashutte.glasses.ProjectionExperiments
 import io.github.dmulder.glashutte.glasses.TrackingExperiments
 import io.github.dmulder.glashutte.spatial.WorkspaceController
 import java.io.File
@@ -89,6 +90,16 @@ class DiagnosticsActivity : Activity() {
         root.addView(
             check("Show diagnostics overlay on the glasses", TrackingExperiments.glassesOverlay(this)) {
                 TrackingExperiments.setGlassesOverlay(this, it)
+            },
+        )
+        root.addView(
+            check(
+                "Calibrated projection: real glasses FOV, zoom scales the scene not the projection " +
+                    "(OFF = legacy 55° projection zoom; applies live)",
+                ProjectionExperiments.calibratedProjection(this),
+            ) {
+                ProjectionExperiments.setCalibratedProjection(this, it)
+                GlassesDiagnostics.i(TAG, "diagnostics screen: calibrated projection set to $it")
             },
         )
 
