@@ -682,8 +682,9 @@ class PrivilegedServer() : IPrivilegedService.Stub() {
 
     // region Hotkey monitor — mirrors the Windows companion's WH_KEYBOARD_LL global hook.
     //
-    // MainActivity runs with FLAG_NOT_FOCUSABLE so it never sees physical key events. The
-    // shell uid we run as can read `/dev/input/event*` directly (same path `adb getevent`
+    // Raw hardware events are read here because the phone activity does not forward them
+    // anywhere on its own (it only sees them while it holds focus, and the workspace and
+    // apps live on other displays). The shell uid we run as can read `/dev/input/event*` directly (same path `adb getevent`
     // uses), which gives us every keyboard regardless of focused window or display. We
     // read passively — the OS still delivers the same events to whatever window has
     // focus, so this is a spy, not an interceptor.
