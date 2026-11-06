@@ -5,10 +5,15 @@ name: Android build
 on:
   push:
     branches: [main]
-    paths: ["Android/**", ".github/workflows/android.yml"]
+    paths: ["Android/**", ".github/workflows/android.yml", "Dockerfile", "Makefile", "docker/**"]
   pull_request:
-    paths: ["Android/**", ".github/workflows/android.yml"]
+    paths: ["Android/**", ".github/workflows/android.yml", "Dockerfile", "Makefile", "docker/**"]
   workflow_dispatch:
+    inputs:
+      container:
+        description: "Also build the APKs through the Makefile's container (make build/apk)"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -60,4 +65,21 @@ jobs:
         with:
           name: glashutte-debug-no-viture-sdk
           path: Android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+
+  # Optional: exercises the same container build developers use locally (Dockerfile + Makefile).
+  # Run it manually from the Actions tab with "container" ticked.
+  container-build:
+    if: github.event_name == 'workflow_dispatch' && inputs.container
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build APKs in the container (no VITURE SDK)
+        run: make CONTAINER_ENGINE=docker build/apk
+      - name: Upload APKs
+        uses: actions/upload-artifact@v4
+        with:
+          name: glashutte-container-apks-no-viture-sdk
+          path: dist/*.apk
           if-no-files-found: error

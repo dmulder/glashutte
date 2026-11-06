@@ -1,0 +1,5 @@
+# The image build needs nothing from the working tree except the entrypoint script.
+# Ignoring everything else guarantees that local files (in particular a locally supplied
+# VITURE SDK, build outputs or keystores) can never be copied into the image.
+*
+!docker/entrypoint.sh

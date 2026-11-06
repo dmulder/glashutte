@@ -12,6 +12,7 @@
 
 ## Development setup
 
+- No local toolchain? `make build/apk` and `make test` from the repo root run everything in a container (see the root README).
 - JDK 21, Android SDK platform 37.0, build-tools 36.0.0 (NDK 30.0.14904198 and CMake
   4.1.2 only for builds that include the SDK).
 - Point `sdk.dir` in `local.properties` at your Android SDK.

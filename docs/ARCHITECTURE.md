@@ -152,6 +152,37 @@ outside the repository (JNI bridge compiles, symbols carry the new package name,
 get packaged, Kotlin picks `VitureGlassesBackend`). The real SDK was not available, so
 the real link and runtime behaviour are in the checklist below.
 
+### Container build
+
+`Dockerfile`, `docker/entrypoint.sh`, and the top-level `Makefile` provide a reproducible build
+environment (usage in the [README](../README.md#building-in-a-container-podman-or-docker)).
+Design points:
+
+- **Image = toolchain only.** Ubuntu 24.04, OpenJDK 21, Android cmdline-tools (pinned by
+  SHA-256), platform `android-37.0`, build-tools 36.0.0, NDK 30.0.14904198 and CMake 4.1.2.
+  `.dockerignore` excludes the whole build context except the entrypoint, so neither source nor
+  an SDK can leak into a layer. The SDK is only ever a runtime `:ro` bind mount at
+  `/viture-sdk`, enabled when `include/viture_glasses_provider.h` exists there.
+- **Source is read-only.** `/src` is mounted `:ro` (with `:Z`, SELinux private label), the
+  entrypoint `rsync`s `Android/` to a scratch volume (excluding `build/`, `.gradle/`, `.cxx/`,
+  `local.properties` and `libs/viture-sdk`), builds there, and copies APKs to `/out` (`dist/`).
+- **Users.** Rootless podman: `--userns=keep-id`; rootful docker: `--user uid:gid`; the home,
+  Gradle and Android directories are under `/cache` (world-writable, a named volume) so any
+  uid works, and the JVM `user.home` is pinned to it.
+- **Platform.** The Android NDK/build-tools are x86-64 Linux binaries, so the image is
+  `linux/amd64` (emulated on arm64 hosts).
+- **`compileSdk`.** Now declared as `release(37) { minorApiLevel = 0 }`, which resolves to the
+  `android-37.0` platform that `sdkmanager` installs (plain `compileSdk = 37` looked for
+  `android-37` and failed in the container).
+- **CI.** The default `build` job is unchanged. A manual run of the workflow with the
+  `container` input ticked also runs `make CONTAINER_ENGINE=docker build/apk` and uploads the APKs.
+
+Verified in an agent VM: podman 4.9.3 (rootless) and docker 29.1.3 (rootful) both built the
+image and produced debug and release stub APKs through `make build/apk`; with a fake SDK
+(public headers, outside the repo) mounted, the NDK/CMake build ran and the APK contained the
+`.so` files, `VITURE=off` forced the stub, `make test` passed, and the image contains no SDK.
+Not verified: SELinux-enforcing hosts, arm64 hosts, and the CI container job (manual-only).
+
 ## 7. Hardware test checklist
 
 Only testable with the owner's Pixel 10 Pro XL, Android 17 and glasses:

@@ -96,6 +96,39 @@ and uploads the stub-backend debug APK as a build artifact. Build notes and the
 dependency (JitPack) caveat are in
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md#6-build-and-ci).
 
+### Building in a container (podman or docker)
+
+No local JDK/Android SDK/NDK? The `Makefile` builds a container image holding every build
+dependency (JDK 21, Android platform 37.0, build-tools 36.0.0, NDK 30.0.14904198, CMake 4.1.2)
+and runs the Gradle build inside it. podman is preferred, docker is the fallback
+(`CONTAINER_ENGINE=docker` / `=podman` overrides).
+
+```bash
+make help            # list targets and variables
+make image           # build the build-environment image (once; ~1.5 GB)
+make build/apk       # debug + release APKs -> dist/
+make build/apk-debug # or build/apk-release
+make test            # :glasses unit tests
+make shell           # interactive shell in the build environment
+make clean           # remove dist/ and the scratch build volume (distclean: also caches + image)
+```
+
+- Your source tree is mounted **read-only** (`:Z` relabel for SELinux hosts); the build runs on a
+  copy in a named volume, so the working tree is never touched. Gradle and Android caches
+  live in the named volume `glashutte-cache`, so repeat builds are fast. Rootless podman uses
+  `--userns=keep-id`, so `dist/` is owned by you.
+- APKs are named `glashutte-<variant>-no-viture-sdk.apk` or `-with-viture-sdk.apk`. The
+  release APK is **unsigned**; sign it yourself (`apksigner`) before installing.
+- **VITURE SDK:** if `Android/libs/viture-sdk` (or the directory in `VITURE_SDK_DIR=...`)
+  contains the SDK, it is bind-mounted **read-only** into the container and the build picks it
+  up. It is never copied into the image or the build context, and never committed.
+  `make build/apk VITURE=off` forces the stub backend even when the SDK is present.
+- **The image is safe to share in the sense that it holds no VITURE SDK and no Glashutte source,**
+  but it does bundle Google's Android SDK/NDK under Google's licence terms. Build it locally;
+  do not push it to a public registry.
+- The Dockerfile pulls `docker.io/library/ubuntu:24.04` by default; use `BASE_IMAGE=...` for a
+  mirror. Keep the version pins in the `Dockerfile` in sync with `Android/*/build.gradle.kts`.
+
 First run on the phone: pair the privileged helper through Wireless Debugging (see
 [`Android/docs/PRIVILEGE.md`](Android/docs/PRIVILEGE.md)), plug in the glasses, accept the
 USB permission dialog. More on usage, hotkeys and troubleshooting in
