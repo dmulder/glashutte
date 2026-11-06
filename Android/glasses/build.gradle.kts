@@ -4,7 +4,7 @@ plugins {
 }
 
 android {
-    namespace = "com.uxspace.glasses"
+    namespace = "io.github.dmulder.glashutte.glasses"
     compileSdk = 36
     ndkVersion = "30.0.14904198"
 

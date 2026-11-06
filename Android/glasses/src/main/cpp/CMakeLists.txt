@@ -1,4 +1,4 @@
-# Builds libglasses_bridge.so — the JNI bridge between UxSpace and the native VITURE SDK.
+# Builds libglasses_bridge.so — the JNI bridge between Glashutte and the native VITURE SDK.
 cmake_minimum_required(VERSION 3.22.1)
 project(glasses_bridge)
 

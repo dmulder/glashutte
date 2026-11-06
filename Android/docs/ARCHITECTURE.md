@@ -1,4 +1,4 @@
-# UxSpace Architecture v2 — a spatial window manager
+# Glashutte Architecture v2 — a spatial window manager
 
 ## 1. Why reorganize
 
@@ -138,8 +138,8 @@ device. The decoupling also sets up the `:tracking`/`:viture` split and Shizuku 
    `VirtualScreen`, `WorkspaceController`, `WorkspaceSurfaceView`, `WorkspacePresentation`
    — into a `:spatial` library. The renderer reaches `DesktopPresentation` and Shizuku
    only through injected `WorkspaceController` hooks, so the graph
-   `:glasses ← :spatial ← :app` is acyclic. Code is in package `com.uxspace.spatial`; the
-   desktop UI (`DesktopPresentation`) in `com.uxspace.desktop`.
+   `:glasses ← :spatial ← :app` is acyclic. Code is in package `io.github.dmulder.glashutte.spatial`; the
+   desktop UI (`DesktopPresentation`) in `io.github.dmulder.glashutte.desktop`.
 4. ⏳ **Extract `:ui`.** Cursor, input mapping, shared view components — once that
    framework exists (M4).
 5. **Bundle Shizuku** into `:privileged` — server in the APK, in-app Wireless-Debugging
@@ -188,22 +188,22 @@ pipeline, and gives the One UI look without rebuilding it.
 
 ## 8. Privileged access — bundling Shizuku
 
-UxSpace needs shell-level privilege to launch third-party apps onto its virtual displays
+Glashutte needs shell-level privilege to launch third-party apps onto its virtual displays
 (`am start --display`) and, later, to inject input. A non-rooted app **cannot
-self-elevate**, so today UxSpace depends on the separately-installed **Shizuku app**.
+self-elevate**, so today Glashutte depends on the separately-installed **Shizuku app**.
 
-Shizuku's server is open source (Apache-2.0) — no conflict with UxSpace, also open
-source. So UxSpace will **bundle it**: ship the Shizuku server inside UxSpace's own APK and
+Shizuku's server is open source (Apache-2.0) — no conflict with Glashutte, also open
+source. So Glashutte will **bundle it**: ship the Shizuku server inside Glashutte's own APK and
 own the whole flow in a `:privileged` module. No second app to install. (Apache-2.0
 requires keeping Shizuku's licence + NOTICE — added to the module.)
 
 What bundling changes — and what it cannot:
 
 - **Removed:** the separate Shizuku-app install and its onboarding.
-- **Owned by UxSpace:** its own start command, its own pairing, restarting the server on
+- **Owned by Glashutte:** its own start command, its own pairing, restarting the server on
   later launches.
 - **Irreducible (OS security boundary):** the privileged process must be started by
-  *something* that already holds shell privilege. UxSpace does this in-app, no PC needed —
+  *something* that already holds shell privilege. Glashutte does this in-app, no PC needed —
   it pairs with the device's own **Wireless Debugging**, connects over local ADB-Wi-Fi,
   and starts the bundled server. The pairing is kept, so later launches reconnect
   silently — but the one-time pairing itself cannot be removed without root.
@@ -231,10 +231,10 @@ toolbar.
 
 ## 10. Vendor-agnostic — any display, pluggable trackers
 
-UxSpace must not be welded to the VITURE SDK. Two capabilities, independent:
+Glashutte must not be welded to the VITURE SDK. Two capabilities, independent:
 
 - **An external display.** The workspace `Presentation` runs on *any* connected external
-  display — no SDK needed. With only a display, UxSpace still gives the full desktop:
+  display — no SDK needed. With only a display, Glashutte still gives the full desktop:
   multiple screens, taskbar, app drawer, cursor — in **PINNED** view (the desktop locked
   to the display).
 - **Head tracking.** An *optional* capability behind the `HeadTracker` interface
@@ -247,5 +247,5 @@ live `HeadTracker`. With none — a plain monitor, or unsupported glasses — th
 toggle offers PINNED only. Everything else — multi-screen layouts, desktop, drawer,
 cursor, input — is unchanged.
 
-Only `:app` knows VITURE exists; it composes a provider in, and the rest of UxSpace sees
+Only `:app` knows VITURE exists; it composes a provider in, and the rest of Glashutte sees
 just the `HeadTracker` interface and "an external display."

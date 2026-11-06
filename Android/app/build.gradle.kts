@@ -4,11 +4,11 @@ plugins {
 }
 
 android {
-    namespace = "com.uxspace"
+    namespace = "io.github.dmulder.glashutte"
     compileSdk = 36
 
     defaultConfig {
-        applicationId = "com.uxspace"
+        applicationId = "io.github.dmulder.glashutte"
         minSdk = 26
         targetSdk = 36
         versionCode = 1
@@ -56,7 +56,7 @@ dependencies {
     implementation(libs.androidx.lifecycle.runtime.ktx)
     implementation(libs.kotlinx.coroutines.android)
 
-    // Embedded ADB client — UxSpace activates its own shell-uid helper over Wireless
+    // Embedded ADB client — Glashutte activates its own shell-uid helper over Wireless
     // Debugging, with no separate Shizuku app. See docs/PRIVILEGE.md.
     implementation(libs.libadb.android)
     implementation(libs.conscrypt.android)

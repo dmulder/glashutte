@@ -1,15 +1,15 @@
 # Optometry pseudo-app
 
-A built-in UxSpace tool to help the user dial in the **focus wheels** on their VITURE
+A built-in Glashutte tool to help the user dial in the **focus wheels** on their VITURE
 glasses — VITURE One / One Pro have per-eye dioptre adjustment knobs (~±5.0 D); Luma has
 fixed lenses. An optometry-style chart is the standard way to know when you've nailed it.
 
 ## Why a pseudo-app
 
 It's not a real Android app — there's no package to launch, no Shizuku call, no virtual
-display for it. It is **UxSpace's own UI** drawn on its own `UiScreen`, the same way
-[`DesktopPresentation`](../app/src/main/kotlin/com/uxspace/desktop/DesktopPresentation.kt)
-and [`DrawerPresentation`](../app/src/main/kotlin/com/uxspace/desktop/DrawerPresentation.kt)
+display for it. It is **Glashutte's own UI** drawn on its own `UiScreen`, the same way
+[`DesktopPresentation`](../app/src/main/kotlin/io/github/dmulder/glashutte/desktop/DesktopPresentation.kt)
+and [`DrawerPresentation`](../app/src/main/kotlin/io/github/dmulder/glashutte/desktop/DrawerPresentation.kt)
 are. That keeps it instant to open, free of any launch failure modes, and able to render at
 the workspace's native resolution.
 

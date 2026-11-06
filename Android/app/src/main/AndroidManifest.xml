@@ -10,7 +10,7 @@
 
     <!--
       The wireless-debugging "Pair device with a pairing code" dialog stops advertising its
-      mDNS service the moment it backgrounds. To pair without leaving the dialog, UxSpace
+      mDNS service the moment it backgrounds. To pair without leaving the dialog, Glashutte
       posts a notification with a RemoteInput field — the user types the code in the
       notification shade *over* the dialog. Needs POST_NOTIFICATIONS on Android 13+.
     -->
@@ -24,7 +24,7 @@
 
     <!--
       WorkspaceService is a foreground service tied to the glasses USB session — it lets
-      UxSpace keep the workspace + launched apps alive while the phone screen is off, and
+      Glashutte keep the workspace + launched apps alive while the phone screen is off, and
       its onDestroy is the cleanup anchor that force-stops launched apps when the glasses
       disconnect. `connectedDevice` is the Android 14+ FGS type for "driven by an external
       device connection".
@@ -33,7 +33,7 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
 
     <!--
-      UxSpace lists the installed apps the user can launch onto a virtual screen, so it needs
+      Glashutte lists the installed apps the user can launch onto a virtual screen, so it needs
       to see other packages' launcher activities (Android 11+ package visibility).
     -->
     <queries>
@@ -44,13 +44,13 @@
     </queries>
 
     <application
-        android:name=".UxSpaceApp"
+        android:name=".GlashutteApp"
         android:allowBackup="true"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
-        android:theme="@style/Theme.UxSpace">
+        android:theme="@style/Theme.Glashutte">
 
         <!-- Phone-side control panel: pick an app, see glasses status. -->
         <activity
@@ -65,7 +65,7 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
             <!--
-              Connecting the VITURE glasses launches UxSpace and, by virtue of receiving this
+              Connecting the VITURE glasses launches Glashutte and, by virtue of receiving this
               intent, grants it USB access to the glasses — so head tracking can read the IMU
               without a separate, easily-missed permission prompt.
             -->
@@ -86,26 +86,26 @@
         -->
         <provider
             android:name=".privileged.BinderReceiverProvider"
-            android:authorities="com.uxspace.privileged"
+            android:authorities="io.github.dmulder.glashutte.privileged"
             android:enabled="true"
             android:exported="true" />
 
         <!--
           Catches the RemoteInput pairing code typed into PairingNotifier's notification.
-          Not exported — only UxSpace's own notification can deliver into it.
+          Not exported — only Glashutte's own notification can deliver into it.
         -->
         <receiver
             android:name=".privileged.PairingInputReceiver"
             android:exported="false">
             <intent-filter>
-                <action android:name="com.uxspace.privileged.SUBMIT_PAIRING_CODE" />
+                <action android:name="io.github.dmulder.glashutte.privileged.SUBMIT_PAIRING_CODE" />
             </intent-filter>
         </receiver>
 
         <!--
           Workspace lifecycle anchor. Started by MainActivity when the glasses display
           comes up; stopped when it goes away (or when the activity is destroyed). Its
-          onDestroy force-stops every app UxSpace launched into the workspace, so a
+          onDestroy force-stops every app Glashutte launched into the workspace, so a
           launched app never outlives the glasses session.
         -->
         <service
@@ -119,7 +119,7 @@
           virtual displays. Requires a one-time opt-in in Settings > Accessibility.
         -->
         <service
-            android:name=".UxSpaceAccessibilityService"
+            android:name=".GlashutteAccessibilityService"
             android:exported="false"
             android:label="@string/app_name"
             android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">

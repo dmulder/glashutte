@@ -1,6 +1,6 @@
-// JNI bridge between UxSpace and the native VITURE SDK (libglasses.so).
+// JNI bridge between Glashutte and the native VITURE SDK (libglasses.so).
 //
-// Mirrors the lifecycle of the official VITURE Android demo, trimmed to what UxSpace needs
+// Mirrors the lifecycle of the official VITURE Android demo, trimmed to what Glashutte needs
 // for head tracking: device lifecycle, IMU/Carina pose, and native-DOF capability. Camera
 // support is intentionally omitted.
 #include <jni.h>
@@ -17,7 +17,7 @@
 #include "viture_device_carina.h"
 #include "viture_protocol_public.h"
 
-#define LOG_TAG "UxSpace/Native"
+#define LOG_TAG "Glashutte/Native"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  LOG_TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 
@@ -135,20 +135,20 @@ static void destroy_handle_locked() {
 }
 
 // ---------------------------------------------------------------------------
-// JNI — all methods of com.uxspace.glasses.NativeGlasses
+// JNI — all methods of io.github.dmulder.glashutte.glasses.NativeGlasses
 // ---------------------------------------------------------------------------
 
 extern "C" {
 
 JNIEXPORT jstring JNICALL
-Java_com_uxspace_glasses_NativeGlasses_getVersion(JNIEnv* env, jobject) {
+Java_io_github_dmulder_glashutte_glasses_NativeGlasses_getVersion(JNIEnv* env, jobject) {
     const char* v = GetVersionString();
     LOGI("libglasses version: %s", v ? v : "(null)");
     return env->NewStringUTF(v ? v : "");
 }
 
 JNIEXPORT jboolean JNICALL
-Java_com_uxspace_glasses_NativeGlasses_create(JNIEnv*, jobject, jint pid, jint fd) {
+Java_io_github_dmulder_glashutte_glasses_NativeGlasses_create(JNIEnv*, jobject, jint pid, jint fd) {
     std::lock_guard<std::mutex> lk(g_lifecycle_mtx);
     destroy_handle_locked();
     reset_pose_state();
@@ -162,21 +162,21 @@ Java_com_uxspace_glasses_NativeGlasses_create(JNIEnv*, jobject, jint pid, jint f
 }
 
 JNIEXPORT jint JNICALL
-Java_com_uxspace_glasses_NativeGlasses_getDeviceType(JNIEnv*, jobject) {
+Java_io_github_dmulder_glashutte_glasses_NativeGlasses_getDeviceType(JNIEnv*, jobject) {
     std::lock_guard<std::mutex> lk(g_lifecycle_mtx);
     if (!g_handle) return -1;
     return xr_device_provider_get_device_type(g_handle);
 }
 
 JNIEXPORT jint JNICALL
-Java_com_uxspace_glasses_NativeGlasses_registerStateCallback(JNIEnv*, jobject) {
+Java_io_github_dmulder_glashutte_glasses_NativeGlasses_registerStateCallback(JNIEnv*, jobject) {
     std::lock_guard<std::mutex> lk(g_lifecycle_mtx);
     if (!g_handle) return VITURE_GLASSES_ERROR_INVALID_PARAM;
     return xr_device_provider_register_state_callback(g_handle, state_cb);
 }
 
 JNIEXPORT jint JNICALL
-Java_com_uxspace_glasses_NativeGlasses_initialize(JNIEnv*, jobject) {
+Java_io_github_dmulder_glashutte_glasses_NativeGlasses_initialize(JNIEnv*, jobject) {
     std::lock_guard<std::mutex> lk(g_lifecycle_mtx);
     if (!g_handle) return VITURE_GLASSES_ERROR_INVALID_PARAM;
     int r = xr_device_provider_initialize(g_handle, nullptr, nullptr);
@@ -185,7 +185,7 @@ Java_com_uxspace_glasses_NativeGlasses_initialize(JNIEnv*, jobject) {
 }
 
 JNIEXPORT jint JNICALL
-Java_com_uxspace_glasses_NativeGlasses_start(JNIEnv*, jobject) {
+Java_io_github_dmulder_glashutte_glasses_NativeGlasses_start(JNIEnv*, jobject) {
     std::lock_guard<std::mutex> lk(g_lifecycle_mtx);
     if (!g_handle) return VITURE_GLASSES_ERROR_INVALID_PARAM;
     int r = xr_device_provider_start(g_handle);
@@ -195,28 +195,28 @@ Java_com_uxspace_glasses_NativeGlasses_start(JNIEnv*, jobject) {
 }
 
 JNIEXPORT jint JNICALL
-Java_com_uxspace_glasses_NativeGlasses_stop(JNIEnv*, jobject) {
+Java_io_github_dmulder_glashutte_glasses_NativeGlasses_stop(JNIEnv*, jobject) {
     std::lock_guard<std::mutex> lk(g_lifecycle_mtx);
     if (!g_handle) return VITURE_GLASSES_ERROR_INVALID_PARAM;
     return xr_device_provider_stop(g_handle);
 }
 
 JNIEXPORT jint JNICALL
-Java_com_uxspace_glasses_NativeGlasses_shutdown(JNIEnv*, jobject) {
+Java_io_github_dmulder_glashutte_glasses_NativeGlasses_shutdown(JNIEnv*, jobject) {
     std::lock_guard<std::mutex> lk(g_lifecycle_mtx);
     if (!g_handle) return VITURE_GLASSES_ERROR_INVALID_PARAM;
     return xr_device_provider_shutdown(g_handle);
 }
 
 JNIEXPORT void JNICALL
-Java_com_uxspace_glasses_NativeGlasses_destroy(JNIEnv*, jobject) {
+Java_io_github_dmulder_glashutte_glasses_NativeGlasses_destroy(JNIEnv*, jobject) {
     std::lock_guard<std::mutex> lk(g_lifecycle_mtx);
     destroy_handle_locked();
 }
 
 // Gen1/Gen2: register the pose callback and open the IMU at the high sample rate.
 JNIEXPORT jint JNICALL
-Java_com_uxspace_glasses_NativeGlasses_openImu(JNIEnv*, jobject) {
+Java_io_github_dmulder_glashutte_glasses_NativeGlasses_openImu(JNIEnv*, jobject) {
     std::lock_guard<std::mutex> lk(g_lifecycle_mtx);
     if (!g_handle) return VITURE_GLASSES_ERROR_INVALID_PARAM;
     xr_device_provider_register_imu_pose_callback(g_handle, imu_pose_cb);
@@ -226,7 +226,7 @@ Java_com_uxspace_glasses_NativeGlasses_openImu(JNIEnv*, jobject) {
 }
 
 JNIEXPORT jint JNICALL
-Java_com_uxspace_glasses_NativeGlasses_closeImu(JNIEnv*, jobject) {
+Java_io_github_dmulder_glashutte_glasses_NativeGlasses_closeImu(JNIEnv*, jobject) {
     std::lock_guard<std::mutex> lk(g_lifecycle_mtx);
     if (!g_handle) return VITURE_GLASSES_ERROR_INVALID_PARAM;
     return xr_device_provider_close_imu(g_handle, VITURE_IMU_MODE_POSE);
@@ -235,13 +235,13 @@ Java_com_uxspace_glasses_NativeGlasses_closeImu(JNIEnv*, jobject) {
 // Capability query: true if the product does head tracking on the glasses themselves.
 // Operates on the product id, so it can be called before create().
 JNIEXPORT jboolean JNICALL
-Java_com_uxspace_glasses_NativeGlasses_isProductSupportNativeDof(JNIEnv*, jobject, jint pid) {
+Java_io_github_dmulder_glashutte_glasses_NativeGlasses_isProductSupportNativeDof(JNIEnv*, jobject, jint pid) {
     return xr_device_provider_is_product_support_native_dof(pid) ? JNI_TRUE : JNI_FALSE;
 }
 
 // Switch a native-DOF device into native mode for on-device 3DOF tracking.
 JNIEXPORT void JNICALL
-Java_com_uxspace_glasses_NativeGlasses_setupNativeDofDevice(JNIEnv*, jobject) {
+Java_io_github_dmulder_glashutte_glasses_NativeGlasses_setupNativeDofDevice(JNIEnv*, jobject) {
     std::lock_guard<std::mutex> lk(g_lifecycle_mtx);
     if (!g_handle) return;
     int rc = xr_device_provider_native_set_mode(g_handle, 1);
@@ -259,7 +259,7 @@ Java_com_uxspace_glasses_NativeGlasses_setupNativeDofDevice(JNIEnv*, jobject) {
 }
 
 JNIEXPORT jint JNICALL
-Java_com_uxspace_glasses_NativeGlasses_nativeRecenterDof(JNIEnv*, jobject) {
+Java_io_github_dmulder_glashutte_glasses_NativeGlasses_nativeRecenterDof(JNIEnv*, jobject) {
     std::lock_guard<std::mutex> lk(g_lifecycle_mtx);
     if (!g_handle) return VITURE_GLASSES_ERROR_INVALID_PARAM;
     return xr_device_provider_native_recenter_dof(g_handle);
@@ -267,14 +267,14 @@ Java_com_uxspace_glasses_NativeGlasses_nativeRecenterDof(JNIEnv*, jobject) {
 
 // Carina: must be called after create and before initialize.
 JNIEXPORT jint JNICALL
-Java_com_uxspace_glasses_NativeGlasses_setDofTypeCarina(JNIEnv*, jobject, jboolean is6dof) {
+Java_io_github_dmulder_glashutte_glasses_NativeGlasses_setDofTypeCarina(JNIEnv*, jobject, jboolean is6dof) {
     std::lock_guard<std::mutex> lk(g_lifecycle_mtx);
     if (!g_handle) return VITURE_GLASSES_ERROR_INVALID_PARAM;
     return xr_device_provider_set_dof_type_carina(g_handle, is6dof ? 1 : 0);
 }
 
 JNIEXPORT void JNICALL
-Java_com_uxspace_glasses_NativeGlasses_startCarinaPollThread(JNIEnv*, jobject) {
+Java_io_github_dmulder_glashutte_glasses_NativeGlasses_startCarinaPollThread(JNIEnv*, jobject) {
     std::lock_guard<std::mutex> lk(g_lifecycle_mtx);
     if (g_poll_running) return;
     g_poll_running = true;
@@ -282,7 +282,7 @@ Java_com_uxspace_glasses_NativeGlasses_startCarinaPollThread(JNIEnv*, jobject) {
 }
 
 JNIEXPORT void JNICALL
-Java_com_uxspace_glasses_NativeGlasses_stopCarinaPollThread(JNIEnv*, jobject) {
+Java_io_github_dmulder_glashutte_glasses_NativeGlasses_stopCarinaPollThread(JNIEnv*, jobject) {
     std::lock_guard<std::mutex> lk(g_lifecycle_mtx);
     if (!g_poll_running) return;
     g_poll_running = false;
@@ -290,7 +290,7 @@ Java_com_uxspace_glasses_NativeGlasses_stopCarinaPollThread(JNIEnv*, jobject) {
 }
 
 JNIEXPORT jboolean JNICALL
-Java_com_uxspace_glasses_NativeGlasses_carinaStopForModeSwitch(JNIEnv*, jobject) {
+Java_io_github_dmulder_glashutte_glasses_NativeGlasses_carinaStopForModeSwitch(JNIEnv*, jobject) {
     std::lock_guard<std::mutex> lk(g_lifecycle_mtx);
     if (g_poll_running) {
         g_poll_running = false;
@@ -304,7 +304,7 @@ Java_com_uxspace_glasses_NativeGlasses_carinaStopForModeSwitch(JNIEnv*, jobject)
 
 // Carina: SDK-level yaw + position reset — relocates the coordinate frame to the user.
 JNIEXPORT jint JNICALL
-Java_com_uxspace_glasses_NativeGlasses_resetOriginCarina(JNIEnv*, jobject) {
+Java_io_github_dmulder_glashutte_glasses_NativeGlasses_resetOriginCarina(JNIEnv*, jobject) {
     std::lock_guard<std::mutex> lk(g_lifecycle_mtx);
     if (!g_handle) return VITURE_GLASSES_ERROR_INVALID_PARAM;
     float pose[7];
@@ -317,7 +317,7 @@ Java_com_uxspace_glasses_NativeGlasses_resetOriginCarina(JNIEnv*, jobject) {
 
 // Carina: full VIO re-initialisation.
 JNIEXPORT jint JNICALL
-Java_com_uxspace_glasses_NativeGlasses_resetPoseCarina(JNIEnv*, jobject) {
+Java_io_github_dmulder_glashutte_glasses_NativeGlasses_resetPoseCarina(JNIEnv*, jobject) {
     std::lock_guard<std::mutex> lk(g_lifecycle_mtx);
     if (!g_handle) return VITURE_GLASSES_ERROR_INVALID_PARAM;
     return xr_device_provider_reset_pose_carina(g_handle);
@@ -325,7 +325,7 @@ Java_com_uxspace_glasses_NativeGlasses_resetPoseCarina(JNIEnv*, jobject) {
 
 // Returns 7 floats: [roll,pitch,yaw,qw,qx,qy,qz] (Gen1/2) or [px,py,pz,qw,qx,qy,qz] (Carina).
 JNIEXPORT jfloatArray JNICALL
-Java_com_uxspace_glasses_NativeGlasses_getPose(JNIEnv* env, jobject) {
+Java_io_github_dmulder_glashutte_glasses_NativeGlasses_getPose(JNIEnv* env, jobject) {
     jfloatArray arr = env->NewFloatArray(7);
     std::lock_guard<std::mutex> lk(g_pose.mtx);
     env->SetFloatArrayRegion(arr, 0, 7, g_pose.data);
@@ -333,7 +333,7 @@ Java_com_uxspace_glasses_NativeGlasses_getPose(JNIEnv* env, jobject) {
 }
 
 JNIEXPORT jboolean JNICALL
-Java_com_uxspace_glasses_NativeGlasses_isPoseFresh(JNIEnv*, jobject) {
+Java_io_github_dmulder_glashutte_glasses_NativeGlasses_isPoseFresh(JNIEnv*, jobject) {
     std::lock_guard<std::mutex> lk(g_pose.mtx);
     bool f = g_pose.fresh;
     g_pose.fresh = false;
@@ -341,25 +341,25 @@ Java_com_uxspace_glasses_NativeGlasses_isPoseFresh(JNIEnv*, jobject) {
 }
 
 JNIEXPORT jint JNICALL
-Java_com_uxspace_glasses_NativeGlasses_getPoseStatus(JNIEnv*, jobject) {
+Java_io_github_dmulder_glashutte_glasses_NativeGlasses_getPoseStatus(JNIEnv*, jobject) {
     std::lock_guard<std::mutex> lk(g_pose.mtx);
     return g_pose.pose_status;
 }
 
 JNIEXPORT jint JNICALL
-Java_com_uxspace_glasses_NativeGlasses_getBrightness(JNIEnv*, jobject) {
+Java_io_github_dmulder_glashutte_glasses_NativeGlasses_getBrightness(JNIEnv*, jobject) {
     std::lock_guard<std::mutex> lk(g_dev.mtx);
     return g_dev.brightness;
 }
 
 JNIEXPORT jint JNICALL
-Java_com_uxspace_glasses_NativeGlasses_getVolume(JNIEnv*, jobject) {
+Java_io_github_dmulder_glashutte_glasses_NativeGlasses_getVolume(JNIEnv*, jobject) {
     std::lock_guard<std::mutex> lk(g_dev.mtx);
     return g_dev.volume;
 }
 
 JNIEXPORT jint JNICALL
-Java_com_uxspace_glasses_NativeGlasses_getFilm(JNIEnv*, jobject) {
+Java_io_github_dmulder_glashutte_glasses_NativeGlasses_getFilm(JNIEnv*, jobject) {
     std::lock_guard<std::mutex> lk(g_dev.mtx);
     return g_dev.film;
 }

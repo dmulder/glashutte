@@ -4,7 +4,7 @@ plugins {
 }
 
 android {
-    namespace = "com.uxspace.spatial"
+    namespace = "io.github.dmulder.glashutte.spatial"
     compileSdk = 36
 
     defaultConfig {

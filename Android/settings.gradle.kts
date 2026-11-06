@@ -22,7 +22,7 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "UxSpace"
+rootProject.name = "Glashutte"
 
 include(":glasses")
 include(":spatial")
