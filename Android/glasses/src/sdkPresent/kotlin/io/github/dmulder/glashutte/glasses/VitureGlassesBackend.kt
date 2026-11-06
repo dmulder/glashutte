@@ -202,6 +202,11 @@ class VitureGlassesBackend : GlassesBackend {
             )
         }
 
+        override fun poseStatus(): Int {
+            if (closed || capabilities.trackingPath != TrackingPath.CARINA_VIO) return -1
+            return NativeGlasses.getPoseStatus()
+        }
+
         override fun recenter(): Boolean {
             if (closed) return false
             val rc = when (capabilities.trackingPath) {

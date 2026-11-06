@@ -403,6 +403,7 @@ class WorkspaceRenderer(
     private val invViewProjection = FloatArray(16)
     private val clipPoint = FloatArray(4)
     private val worldPoint = FloatArray(4)
+    private val neckOffset = FloatArray(3)
 
     /** Queue an app to be opened in a window. Safe to call from any thread. */
     fun requestApp(packageName: String, activityName: String, label: String) {
@@ -3931,11 +3932,20 @@ class WorkspaceRenderer(
         // sits at headPos (scaled + clamped to bound VIO drift); post-multiplying T(-cam)
         // gives view·p = R·(p - cam), the standard view transform for a translated camera.
         // headPos is 0 on orientation-only paths, so this is a no-op there.
-        if (PARALLAX_SCALE != 0f && (headPosX != 0f || headPosY != 0f || headPosZ != 0f)) {
+        val positionTracked = headPosX != 0f || headPosY != 0f || headPosZ != 0f
+        if (PARALLAX_SCALE != 0f && positionTracked) {
             val cx = (headPosX * PARALLAX_SCALE).coerceIn(-PARALLAX_MAX_M, PARALLAX_MAX_M)
             val cy = (headPosY * PARALLAX_SCALE).coerceIn(-PARALLAX_MAX_M, PARALLAX_MAX_M)
             val cz = (headPosZ * PARALLAX_SCALE).coerceIn(-PARALLAX_MAX_M, PARALLAX_MAX_M)
             Matrix.translateM(out, 0, -cx, -cy, -cz)
+        }
+        // Neck pivot: orientation-only tracking turns the camera about the eye, but a head
+        // pivots about the neck, so the eye also swings along a short arc. Skipped when real
+        // position is flowing, since that already contains the arc and this would count it twice.
+        val feel = io.github.dmulder.glashutte.glasses.TrackingFeel.current
+        if (feel.neckPivotEnabled && !positionTracked) {
+            io.github.dmulder.glashutte.glasses.NeckPivot.eyeOffset(ew, ex, ey, ez, feel.neckOffsetM, neckOffset)
+            Matrix.translateM(out, 0, -neckOffset[0], -neckOffset[1], -neckOffset[2])
         }
     }
 

@@ -52,6 +52,9 @@ There is a second launcher icon named **Glashutte Diagnostics**. It shows the li
 - **Experiments** (apply on *Restart tracking*; defaults match upstream behaviour):
   force the tracking path (Auto / Carina 3DoF / Carina 6DoF / host IMU / native DoF),
   pass an app cache directory to SDK `initialize()`, and show a diagnostics overlay on the glasses.
+- **Camera pivot and calibration** (see section 5): neck-pivot camera offset and its length, wait for
+  tracker calibration before taking the reference pose, and the Carina DoF mode. The active values are
+  logged under `GlashutteDiag` as `SETTINGS (...)` lines and in every 5-second heartbeat.
 
 ### Logcat
 
@@ -96,3 +99,20 @@ If tracking is not working, a banner at the top of the glasses view names the fa
   (once) when the glasses device has such an interface. Denying it can leave USB access denied.
 - **Pose rates.** The Carina callback runs at camera rate (about 25 Hz); the app polls the IMU-rate pose
   (about 120 Hz). Both counters are in the report.
+
+## 5. Neck pivot, calibration wait and DoF mode (A/B switches)
+
+All of these live in **Glashutte Diagnostics** under *Camera pivot and calibration*. Each change is
+persisted and logged (`GlashutteDiag: SETTINGS (changed: ...)`).
+
+| Switch | Default | Applies | What it does |
+|---|---|---|---|
+| Neck pivot | on | live | In FREE view with no tracked position, the camera swings about a point `offset` behind the eye along the head's view axis, instead of turning about the eye. At identity the camera is where it always was. Skipped when real 6DoF position is flowing (it already contains the arc). |
+| Neck offset | 12.7 cm | live | Pivot-to-eye distance, 0 to 30 cm. |
+| Wait for calibration | on | live to turn off; next *Restart tracking* to take effect | Carina only. No pose reaches the camera, and no reference pose is taken, until the tracker has calibrated. The glasses show `CALIBRATING HEAD TRACKING ... (N s)` and this screen shows an amber bar. Also re-takes the app-side reference after Ctrl+Alt+R (device recenter). |
+| Minimum calibration wait | 10 s | next *Restart tracking* | In 6DoF the pose status must also read stable for 0.5 s; a status that never settles is overridden after 20 s more (logged as `TIMED OUT`). In 3DoF the status is not meaningful, so it waits on time alone. |
+| Carina DoF | follow app Settings (3DoF) | next *Restart tracking* | `3DoF`, `6DoF with positional parallax`, or `6DoF VIO, orientation only` (6DoF drift correction, camera never translates, so the neck pivot still applies). A forced *Tracking path* above still wins. |
+
+Log lines to look for: `CALIBRATION started`, `CALIBRATION done ... reference pose taken` (or `TIMED OUT`),
+`SETTINGS (...)`, and `calib=[...] feel=[...]` in the heartbeat.
+

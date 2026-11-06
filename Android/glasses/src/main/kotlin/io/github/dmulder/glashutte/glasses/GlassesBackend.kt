@@ -61,6 +61,13 @@ interface GlassesSession : AutoCloseable {
     fun applyLatency(predictSeconds: Double, pollIntervalMicros: Int) {}
 
     /**
+     * The tracker's own stability flag for the latest pose: `0` = settled, any positive value =
+     * still converging, `-1` = this backend does not report one. Carina only reports it
+     * meaningfully in 6DoF; [CalibrationGate] falls back to a plain time wait otherwise.
+     */
+    fun poseStatus(): Int = -1
+
+    /**
      * Ask the *device/SDK* to re-anchor its coordinate frame on where the user is looking now
      * (native on-glasses recentre, or Carina origin reset). Returns whether the request was
      * accepted. This is separate from the app-side heading recentre in [PoseRecenterer],

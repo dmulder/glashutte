@@ -49,6 +49,7 @@ object GlassesDiagnostics {
     private val sessionInfo = LinkedHashMap<String, String>()
     private val events = ArrayDeque<String>()
     private const val MAX_EVENTS = 800
+    private const val CALIBRATED_BANNER_MS = 3000L
 
     private val timeFmt = DateTimeFormatter.ofPattern("HH:mm:ss.SSS")
 
@@ -97,6 +98,14 @@ object GlassesDiagnostics {
     @Volatile private var rendererTrackingActive = false
     @Volatile private var rendererDelivered = 0L
 
+    // --- calibration (written from the pose polling thread) ---------------------------------
+    @Volatile private var calibrating = false
+    @Volatile private var calibrationRemainingMs = 0L
+    @Volatile private var calibrationDetail = "not started"
+    @Volatile private var calibrationDoneAtMs = 0L
+    @Volatile private var calibrationTimedOut = false
+    @Volatile private var lastPoseStatus = -1
+
     // --- permissions ---------------------------------------------------------------------
     @Volatile var cameraPermission: String = "unknown"
     @Volatile var usbPermission: String = "unknown"
@@ -106,6 +115,7 @@ object GlassesDiagnostics {
         if (initialised) return
         initialised = true
         val app = context.applicationContext
+        TrackingFeel.init(app)
         val pkg = runCatching { app.packageManager.getPackageInfo(app.packageName, 0) }.getOrNull()
         @Suppress("DEPRECATION")
         val versionCode = pkg?.let { if (Build.VERSION.SDK_INT >= 28) it.longVersionCode else it.versionCode.toLong() }
@@ -215,7 +225,14 @@ object GlassesDiagnostics {
         lastHasPosition = false
         nativeStats = emptyMap()
         trackingMode = "none"
+        calibrating = false
+        calibrationRemainingMs = 0L
+        calibrationDetail = "not started"
+        calibrationDoneAtMs = 0L
+        calibrationTimedOut = false
+        lastPoseStatus = -1
         append('I', TAG, "---- new tracking session ----")
+        logSettings("session start")
     }
 
     // --- pose stream ---------------------------------------------------------------------
@@ -270,6 +287,79 @@ object GlassesDiagnostics {
     fun poseRateHz(): Float = rateHz
     fun poseCount(): Long = poseSamples.get()
 
+    // --- calibration + tracking-feel settings ---------------------------------------------
+
+    /** Log the active tracking-feel switches under [TAG] so a capture shows what was being tested. */
+    fun logSettings(reason: String) {
+        val line = "SETTINGS ($reason): ${TrackingFeel.current.summary()}"
+        append('I', TAG, line)
+        Log.i(TAG, line)
+    }
+
+    /** The pose thread started waiting for the tracker to calibrate. */
+    fun beginCalibration(detail: String) {
+        calibrating = true
+        calibrationTimedOut = false
+        calibrationDoneAtMs = 0L
+        calibrationDetail = detail
+        val line = "CALIBRATION started: $detail"
+        append('I', TAG, line)
+        Log.i(TAG, line)
+    }
+
+    /** Called per pose while calibrating; cheap (volatile writes only). */
+    fun updateCalibration(remainingMs: Long, poseStatus: Int) {
+        calibrationRemainingMs = remainingMs
+        lastPoseStatus = poseStatus
+    }
+
+    /** The gate opened: the reference pose is being taken now. */
+    fun endCalibration(detail: String, timedOut: Boolean) {
+        calibrating = false
+        calibrationTimedOut = timedOut
+        calibrationDoneAtMs = System.currentTimeMillis()
+        calibrationDetail = detail
+        val line = "CALIBRATION done${if (timedOut) " (TIMED OUT)" else ""}: $detail — reference pose taken"
+        append('I', TAG, line)
+        if (timedOut) Log.w(TAG, line) else Log.i(TAG, line)
+    }
+
+    /** One-line calibration state for reports and the heartbeat. */
+    fun calibrationLine(): String = when {
+        calibrating -> "CALIBRATING (%.1f s left, poseStatus=%d): %s".format(
+            calibrationRemainingMs / 1000f, lastPoseStatus, calibrationDetail,
+        )
+        calibrationDoneAtMs != 0L -> "${if (calibrationTimedOut) "timed out" else "done"}: $calibrationDetail (poseStatus=$lastPoseStatus)"
+        else -> calibrationDetail
+    }
+
+    /** Whether the tracker is still calibrating, for the diagnostics screen. */
+    fun isCalibrating(): Boolean = calibrating
+
+    /**
+     * Banner text for the glasses while calibrating, and for a few seconds after, or null.
+     * Shown first so the user knows why the view is not following the head yet.
+     */
+    fun calibrationBanner(): String? {
+        if (calibrating) {
+            val secs = Math.ceil(calibrationRemainingMs / 1000.0).toInt()
+            return if (secs > 0) {
+                "CALIBRATING HEAD TRACKING - hold still, look straight ahead ($secs s)"
+            } else {
+                "CALIBRATING HEAD TRACKING - waiting for the tracker to settle"
+            }
+        }
+        val doneAt = calibrationDoneAtMs
+        if (doneAt != 0L && System.currentTimeMillis() - doneAt < CALIBRATED_BANNER_MS) {
+            return if (calibrationTimedOut) {
+                "CALIBRATION TIMED OUT - tracker never settled, using it anyway"
+            } else {
+                "HEAD TRACKING CALIBRATED"
+            }
+        }
+        return null
+    }
+
     // --- renderer side -------------------------------------------------------------------
 
     fun setRenderer(viewMode: String, trackingActive: Boolean, delivered: Long) {
@@ -307,6 +397,7 @@ object GlassesDiagnostics {
         if (initialised && !backendSdkBacked) {
             return "STUB BUILD: no Viture SDK in this APK, head tracking is impossible. Rebuild with the SDK."
         }
+        if (calibrating) return "CALIBRATING: ${calibrationLine()}"
         val problem = firstProblem()
             ?: return if (poseChangesLooksDead()) {
                 "Poses arrive (%.0f Hz) but never change: tracker is not tracking head motion".format(rateHz)
@@ -324,13 +415,16 @@ object GlassesDiagnostics {
 
     fun oneLine(): String =
         "backend=$backendName mode=$trackingMode rate=%.0fHz poses=${poseSamples.get()} ".format(rateHz) +
-            "view=$rendererViewMode dof=$rendererTrackingActive | ${verdict()}"
+            "view=$rendererViewMode dof=$rendererTrackingActive calib=[${calibrationLine()}] " +
+            "feel=[${TrackingFeel.current.summary()}] | ${verdict()}"
 
     /** Short multi-line text for the in-glasses overlay. */
     fun overlayText(): String {
         val sb = StringBuilder()
         sb.append("GLASHUTTE DIAG  backend=").append(backendName).append("  mode=").append(trackingMode).append('\n')
         sb.append("pose %.0f Hz  n=%d  view=%s  tracking=%s\n".format(rateHz, poseSamples.get(), rendererViewMode, rendererTrackingActive))
+        sb.append("calib: ").append(calibrationLine()).append('\n')
+        sb.append("feel: ").append(TrackingFeel.current.summary()).append('\n')
         val q = lastRaw
         sb.append("raw q=(%.2f %.2f %.2f %.2f)".format(q[0], q[1], q[2], q[3]))
         if (lastHasPosition) sb.append("  p=(%.2f %.2f %.2f)".format(q[4], q[5], q[6]))
@@ -344,6 +438,7 @@ object GlassesDiagnostics {
         if (!backendSdkBacked) {
             return "NO HEAD TRACKING: this is the STUB build (no Viture SDK)"
         }
+        calibrationBanner()?.let { return it }
         val now = System.currentTimeMillis()
         val poseStatus = stageStatus(Stage.POSE_STREAM)
         val problem = firstProblem() ?: return null
@@ -391,6 +486,10 @@ object GlassesDiagnostics {
         sb.append("camera permission: ").append(cameraPermission).append('\n')
         sb.append("usb permission: ").append(usbPermission).append('\n')
         synchronized(lock) { sessionInfo.forEach { (k, v) -> sb.append(k).append(": ").append(v).append('\n') } }
+
+        sb.append("\n-- Tracking feel (neck pivot / calibration / DoF) --\n")
+        sb.append("settings: ").append(TrackingFeel.current.summary()).append('\n')
+        sb.append("calibration: ").append(calibrationLine()).append('\n')
 
         sb.append("\n-- Pose --\n")
         sb.append("samples=${poseSamples.get()} rate=%.1f Hz changes=$poseChanges totalRotation=%.1f deg\n".format(rateHz, totalRotationDeg))

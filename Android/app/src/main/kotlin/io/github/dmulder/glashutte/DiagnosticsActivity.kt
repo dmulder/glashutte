@@ -20,6 +20,7 @@ import android.widget.Button
 import android.widget.CheckBox
 import android.widget.LinearLayout
 import android.widget.ScrollView
+import android.widget.SeekBar
 import android.widget.Spinner
 import android.widget.ArrayAdapter
 import android.widget.AdapterView
@@ -33,6 +34,7 @@ import io.github.dmulder.glashutte.glasses.LatencyExperiments
 import io.github.dmulder.glashutte.glasses.PredictionMode
 import io.github.dmulder.glashutte.glasses.ProjectionExperiments
 import io.github.dmulder.glashutte.glasses.TrackingExperiments
+import io.github.dmulder.glashutte.glasses.TrackingFeel
 import io.github.dmulder.glashutte.spatial.WorkspaceController
 import java.io.File
 import java.text.SimpleDateFormat
@@ -49,8 +51,12 @@ class DiagnosticsActivity : Activity() {
 
     private val handler = Handler(Looper.getMainLooper())
     private lateinit var reportView: TextView
+    private lateinit var calibrationView: TextView
     private val refresh = object : Runnable {
         override fun run() {
+            val calibrating = GlassesDiagnostics.isCalibrating()
+            calibrationView.visibility = if (calibrating) View.VISIBLE else View.GONE
+            if (calibrating) calibrationView.text = GlassesDiagnostics.calibrationLine()
             reportView.text = GlassesDiagnostics.report(includeEvents = true, includeSdkLog = false)
             handler.postDelayed(this, REFRESH_MS)
         }
@@ -126,6 +132,21 @@ class DiagnosticsActivity : Activity() {
                 LatencyExperiments.update(this) { it.copy(highestRefresh = on) }
             },
         )
+
+        root.addView(
+            ScrollView(this).apply { addView(cameraPivotAndCalibrationSection()) },
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(220)),
+        )
+
+        calibrationView = TextView(this).apply {
+            setTextColor(Color.BLACK)
+            setBackgroundColor(Color.rgb(255, 193, 7))
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+            typeface = Typeface.DEFAULT_BOLD
+            setPadding(dp(8), dp(6), dp(8), dp(6))
+            visibility = View.GONE
+        }
+        root.addView(calibrationView)
 
         reportView = TextView(this).apply {
             typeface = Typeface.MONOSPACE
@@ -294,6 +315,81 @@ class DiagnosticsActivity : Activity() {
             override fun onNothingSelected(p: AdapterView<*>?) = Unit
         }
         return spinner
+    }
+
+    /**
+     * Neck-pivot camera offset, calibration wait and DoF mode. Neck pivot and the calibration
+     * switch apply live; the calibration wait and DoF mode apply on *Restart tracking*. Every
+     * change is logged under GlashutteDiag.
+     */
+    private fun cameraPivotAndCalibrationSection(): View {
+        val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        val feel = TrackingFeel.current
+        box.addView(label("Camera pivot and calibration (A/B on device; logged as GlashutteDiag SETTINGS)", 12f, bold = true))
+        box.addView(
+            check("Neck pivot: camera swings about the neck, not the eye (live; off with 6DoF position)", feel.neckPivotEnabled) {
+                TrackingFeel.setNeckPivotEnabled(this, it)
+            },
+        )
+        box.addView(
+            seekRow(
+                title = { "Neck offset: %.1f cm".format(it / 10f) },
+                max = Math.round(TrackingFeel.MAX_NECK_OFFSET_M * 1000f),
+                initial = Math.round(feel.neckOffsetM * 1000f),
+            ) { TrackingFeel.setNeckOffsetM(this, it / 1000f) },
+        )
+        box.addView(
+            check("Wait for tracking calibration before taking the reference pose (Carina)", feel.waitForCalibration) {
+                TrackingFeel.setWaitForCalibration(this, it)
+            },
+        )
+        box.addView(
+            seekRow(
+                title = { "Minimum calibration wait: $it s (on Restart tracking)" },
+                max = TrackingFeel.MAX_CALIBRATION_WAIT_SEC,
+                initial = feel.calibrationWaitSec,
+            ) { TrackingFeel.setCalibrationWaitSec(this, it) },
+        )
+        box.addView(dofModeSpinner())
+        return box
+    }
+
+    private fun dofModeSpinner(): View {
+        val values = TrackingFeel.DofMode.values()
+        val spinner = Spinner(this)
+        spinner.adapter = ArrayAdapter(
+            this,
+            android.R.layout.simple_spinner_dropdown_item,
+            values.map { "Carina DoF: ${it.label}" },
+        )
+        spinner.setSelection(values.indexOf(TrackingFeel.current.dofMode))
+        spinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(p: AdapterView<*>?, v: View?, pos: Int, id: Long) {
+                if (values[pos] != TrackingFeel.current.dofMode) TrackingFeel.setDofMode(this@DiagnosticsActivity, values[pos])
+            }
+            override fun onNothingSelected(p: AdapterView<*>?) = Unit
+        }
+        return spinner
+    }
+
+    /** A caption that tracks a slider; the value is persisted when the finger lifts. */
+    private fun seekRow(title: (Int) -> String, max: Int, initial: Int, onCommit: (Int) -> Unit): View {
+        val row = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        val caption = label(title(initial), 12f)
+        val bar = SeekBar(this).apply {
+            this.max = max
+            progress = initial.coerceIn(0, max)
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(sb: SeekBar?, value: Int, fromUser: Boolean) {
+                    caption.text = title(value)
+                }
+                override fun onStartTrackingTouch(sb: SeekBar?) = Unit
+                override fun onStopTrackingTouch(sb: SeekBar?) = onCommit(progress)
+            })
+        }
+        row.addView(caption)
+        row.addView(bar)
+        return row
     }
 
     private fun label(text: String, sp: Float, bold: Boolean = false) = TextView(this).apply {

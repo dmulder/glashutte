@@ -94,8 +94,25 @@ class HeadTracking(
     var onCameraPermissionNeeded: (() -> Unit)? = null
 
     // App-side heading recentre (and 6DOF position recentre); the first pose after a (re)start
-    // becomes the reference. Only touched from the pose-polling thread.
+    // becomes the reference. Guarded by [poseLock] (the GL thread pulls poses through it too).
     private val recenterer = PoseRecenterer()
+
+    // Calibration gate: no pose reaches [onPose] (and no reference pose is taken) until the
+    // tracker has calibrated. Only touched from the pose-polling thread, apart from the
+    // volatile hand-offs below.
+    private val calibrationGate = CalibrationGate()
+    private var calibrationLogged = false
+
+    // Whether [onStreamingChanged] last reported true. Streaming is only announced once the
+    // gate is open, so the renderer does not world-lock against an unsettled pose.
+    @Volatile private var reportedActive = false
+
+    // Published by the poll thread when the gate opens, read by [pullPose] on the GL thread.
+    @Volatile private var gateReady = false
+
+    // After a device recenter the SDK's frame has moved, so the app-side reference taken in the
+    // old frame is stale; the poll thread re-takes it once the request is due.
+    @Volatile private var referenceResetAtMs = 0L
     private val orientationOut = FloatArray(4)
     private val positionOut = FloatArray(3)
 
@@ -212,8 +229,10 @@ class HeadTracking(
     private fun startSdk(pid: Int, fd: Int) {
         GlassesDiagnostics.i(TAG, "opening session on backend '${backend.name}' (pid=0x${pid.toString(16)})")
         val opened = try {
+            val feel = TrackingFeel.current
+            GlassesDiagnostics.logSettings("opening session")
             val options = SessionOptions(
-                sixDof = use6Dof(),
+                sixDof = feel.wantsSixDof(use6Dof()),
                 pathOverride = TrackingExperiments.pathOverride(appContext),
                 sdkCacheDir = if (TrackingExperiments.initCacheDir(appContext)) appContext.cacheDir.absolutePath else null,
             )
@@ -247,7 +266,14 @@ class HeadTracking(
      * Ask the device/SDK to re-anchor its frame on where the user is looking (Ctrl+Alt+R).
      * Returns false when no session is open or the backend cannot do it.
      */
-    fun recenterDevice(): Boolean = session?.recenter() ?: false
+    fun recenterDevice(): Boolean {
+        val ok = session?.recenter() ?: false
+        if (ok && TrackingFeel.current.waitForCalibration) {
+            referenceResetAtMs = System.currentTimeMillis() + REFERENCE_RESET_DELAY_MS
+            GlassesDiagnostics.i(TAG, "device recenter accepted — app-side reference will be re-taken")
+        }
+        return ok
+    }
 
     /** Capabilities of the open session, or null while tracking is off. */
     fun capabilities(): GlassesCapabilities? = session?.capabilities
@@ -270,6 +296,10 @@ class HeadTracking(
         lastSeenSampleNanos = 0L
         lastDeliveredSampleNanos = 0L
         appliedLatency = null
+        referenceResetAtMs = 0L
+        // Drop any position left over from a previous (possibly 6DoF) session.
+        onPosition?.invoke(0f, 0f, 0f)
+        beginCalibration(active)
         pollThread = Thread {
             while (polling) {
                 val latency = LatencyExperiments.current()
@@ -289,11 +319,14 @@ class HeadTracking(
                         pose.w, pose.x, pose.y, pose.z, pose.hasPosition, pose.px, pose.py, pose.pz,
                     )
                     if (latency.pullOnRender) {
-                        noteStreamAlive()
-                    } else {
+                        // The GL thread reads the pose in [pullPose]; the gate runs here and
+                        // [pullPose] stays closed until it opens.
+                        noteStreamAlive(active)
+                    } else if (feedPose(active, pose.w, pose.x, pose.y, pose.z)) {
                         lastDeliveredSampleNanos = pose.timestampNanos
-                        feedPose(pose.w, pose.x, pose.y, pose.z)
-                        if (pose.hasPosition) feedPosition(pose.px, pose.py, pose.pz)
+                        if (pose.hasPosition && TrackingFeel.current.deliversPosition) {
+                            feedPosition(pose.px, pose.py, pose.pz)
+                        }
                     }
                 }
                 GlassesDiagnostics.tick(active::diagnostics)
@@ -403,13 +436,81 @@ class HeadTracking(
                 "pose stream stalled: nothing for ${sinceMs} ms",
             )
             GlassesDiagnostics.w(TAG, "pose stream stalled — no pose for ${sinceMs}ms (DOF lost)")
-            runCatching { onStreamingChanged?.invoke(false) }
+            if (reportedActive) {
+                reportedActive = false
+                runCatching { onStreamingChanged?.invoke(false) }
+            }
         }
     }
 
-    /** Record that a pose just arrived and flip the stream-live latch (and callback) if needed. */
-    private fun noteStreamAlive() {
-        lastPoseAtMs = System.currentTimeMillis()
+    /**
+     * Start waiting for the tracker to calibrate. Only Carina VIO needs it; the host-IMU and
+     * native-DoF paths are usable at once, as before.
+     */
+    private fun beginCalibration(active: GlassesSession) {
+        val feel = TrackingFeel.current
+        val now = System.currentTimeMillis()
+        val needed = active.capabilities.trackingPath == TrackingPath.CARINA_VIO
+        calibrationGate.enabled = feel.waitForCalibration && needed
+        calibrationGate.waitMs = feel.calibrationWaitSec * 1000L
+        calibrationGate.begin(now)
+        gateReady = false
+        calibrationLogged = false
+        if (calibrationGate.enabled) {
+            // A restart keeps the renderer's last pose; tell it tracking is not usable until
+            // the new session has calibrated (it world-locks again on the next "true").
+            if (reportedActive) {
+                reportedActive = false
+                runCatching { onStreamingChanged?.invoke(false) }
+            }
+            GlassesDiagnostics.beginCalibration(
+                "waiting >= ${feel.calibrationWaitSec} s" +
+                    if (active.capabilities.providesPosition) " and pose status stable (6DoF)" else " (3DoF: time only)",
+            )
+            calibrationLogged = true
+        } else {
+            GlassesDiagnostics.i(
+                TAG,
+                "calibration wait skipped (" +
+                    (if (needed) "disabled in experiments" else "not needed on ${active.capabilities.trackingPath}") + ")",
+            )
+        }
+    }
+
+    /**
+     * Run the calibration gate for one pose; returns true once poses may be delivered. Until
+     * then no reference pose is taken, so the first delivered pose becomes "straight ahead".
+     */
+    private fun gateOpen(active: GlassesSession, now: Long): Boolean {
+        val feel = TrackingFeel.current
+        if (calibrationGate.phase == CalibrationGate.Phase.READY) {
+            gateReady = true
+            return true
+        }
+        calibrationGate.enabled = feel.waitForCalibration && calibrationGate.enabled
+        calibrationGate.waitMs = feel.calibrationWaitSec * 1000L
+        val statusUsable = active.capabilities.providesPosition
+        val status = active.poseStatus()
+        val phase = calibrationGate.update(now, statusUsable && status >= 0, status)
+        if (phase == CalibrationGate.Phase.CALIBRATING) {
+            GlassesDiagnostics.updateCalibration(calibrationGate.remainingMs(now), status)
+            return false
+        }
+        if (calibrationLogged) {
+            GlassesDiagnostics.endCalibration(calibrationGate.readyReason, calibrationGate.timedOut)
+        }
+        gateReady = true
+        return true
+    }
+
+    /**
+     * Record that a pose just arrived: flip the stream-live latch, run the calibration gate and,
+     * once it is open, announce tracking via [onStreamingChanged]. Returns whether the gate is
+     * open. Runs on the poll thread in both delivery modes, so a pulled pose is gated too.
+     */
+    private fun noteStreamAlive(active: GlassesSession): Boolean {
+        val now = System.currentTimeMillis()
+        lastPoseAtMs = now
         if (!streaming) {
             streaming = true
             GlassesDiagnostics.stage(
@@ -417,16 +518,34 @@ class HeadTracking(
                 "pose stream live",
             )
             GlassesDiagnostics.i(TAG, "pose stream live (DOF up)")
+        }
+        if (!gateOpen(active, now)) return false
+        val resetAt = referenceResetAtMs
+        if (resetAt != 0L && now >= resetAt) {
+            referenceResetAtMs = 0L
+            synchronized(poseLock) {
+                recenterer.reset()
+                poseBuffer.reset()
+            }
+            GlassesDiagnostics.i(TAG, "app-side reference reset after device recenter")
+        }
+        if (!reportedActive) {
+            reportedActive = true
             runCatching { onStreamingChanged?.invoke(true) }
         }
+        return true
     }
 
-    /** Recentre heading against the reference orientation, then deliver via [onPose]. */
-    private fun feedPose(w: Float, x: Float, y: Float, z: Float) {
-        noteStreamAlive()
+    /**
+     * Recentre heading against the reference orientation, then deliver via [onPose].
+     * Returns false while the calibration gate is still closed (nothing delivered).
+     */
+    private fun feedPose(active: GlassesSession, w: Float, x: Float, y: Float, z: Float): Boolean {
+        if (!noteStreamAlive(active)) return false
         synchronized(poseLock) { recenterer.recenterOrientation(w, x, y, z, orientationOut) }
         GlassesDiagnostics.onPoseDelivered(orientationOut[0], orientationOut[1], orientationOut[2], orientationOut[3])
         onPose(orientationOut[0], orientationOut[1], orientationOut[2], orientationOut[3])
+        return true
     }
 
     /**
@@ -476,11 +595,13 @@ class HeadTracking(
             if (delivered != 0L) LatencyTelemetry.onPoseUsed(nowNanos - delivered, 0L)
             return false
         }
+        // Nothing is pulled, and no reference is taken, until the calibration gate has opened.
+        if (!gateReady) return false
         val sample = session?.latestPose() ?: return false
         val pose = synchronized(poseLock) {
             recenterer.recenterOrientation(sample.w, sample.x, sample.y, sample.z, pullOrientation)
             var hasPos = false
-            if (sample.hasPosition) {
+            if (sample.hasPosition && TrackingFeel.current.deliversPosition) {
                 recenterer.recenterPosition(sample.px, sample.py, sample.pz, pullPosition)
                 hasPos = true
             }
@@ -513,6 +634,10 @@ class HeadTracking(
     private companion object {
         const val TAG = "Glashutte/Tracking"
         const val POLL_INTERVAL_MS = 8L  // ~120 Hz
+
+        /** Delay between a device recenter request and re-taking the app-side reference, so
+         *  the SDK's frame change has landed in the poses we read. */
+        const val REFERENCE_RESET_DELAY_MS = 300L
         /** A live pose stream emits at >=60 Hz; a 1.5 s gap is far past any normal lull
          *  and is the threshold for declaring DOF dead. */
         const val STREAM_STALL_TIMEOUT_MS = 1500L
