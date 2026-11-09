@@ -33,6 +33,9 @@ import io.github.dmulder.glashutte.databinding.ActivityMainBinding
 import io.github.dmulder.glashutte.desktop.DesktopWallpaperStore
 import io.github.dmulder.glashutte.desktop.WallpaperSource
 import io.github.dmulder.glashutte.glasses.GlassesDisplay
+import io.github.dmulder.glashutte.glasses.FlatMode
+import io.github.dmulder.glashutte.handoff.HandoffNotifier
+import io.github.dmulder.glashutte.handoff.NativeHandoff
 import io.github.dmulder.glashutte.privileged.PairingNotifier
 import io.github.dmulder.glashutte.privileged.PrivilegedService
 import io.github.dmulder.glashutte.privileged.PrivilegedService.State
@@ -53,7 +56,7 @@ import io.github.dmulder.glashutte.spatial.WorkspaceRenderer
  *    layout, screen size, keyboard) over the trackpad. The phone shows no app list — the
  *    glasses do, and the phone drives them.
  */
-class MainActivity : ComponentActivity() {
+class MainActivity : ComponentActivity(), NativeHandoff.Host {
 
     private lateinit var binding: ActivityMainBinding
 
@@ -410,33 +413,45 @@ class MainActivity : ComponentActivity() {
         }
         binding.trackpad.onMove = { dx, dy ->
             InputDiagnostics.note(trackpadPath, "move")
-            WorkspaceController.moveCursor(dx, dy, trackpadPath)
+            if (NativeHandoff.capturesInput) NativeHandoff.moveFraction(dx, dy)
+            else WorkspaceController.moveCursor(dx, dy, trackpadPath)
         }
         binding.trackpad.onTap = {
             InputDiagnostics.note(trackpadPath, "tap", always = true)
-            WorkspaceController.click(trackpadPath)
+            if (NativeHandoff.capturesInput) NativeHandoff.tap() else WorkspaceController.click(trackpadPath)
         }
         binding.trackpad.onTwoFingerDrag = { dx, dy ->
             InputDiagnostics.note(trackpadPath, "twoFingerDrag")
-            WorkspaceController.twoFingerDrag(dx, dy)
+            if (NativeHandoff.capturesInput) NativeHandoff.scrollFraction(dy) else WorkspaceController.twoFingerDrag(dx, dy)
         }
         binding.trackpad.onZoom = { scale ->
             InputDiagnostics.note(trackpadPath, "pinch")
-            WorkspaceController.pinch(scale)
+            if (!NativeHandoff.capturesInput) WorkspaceController.pinch(scale)
         }
         binding.trackpad.onDragStart = {
             InputDiagnostics.note(trackpadPath, "dragStart", always = true)
-            WorkspaceController.beginDrag()
+            if (NativeHandoff.capturesInput) NativeHandoff.beginDrag() else WorkspaceController.beginDrag()
         }
         binding.trackpad.onDragEnd = {
             InputDiagnostics.note(trackpadPath, "dragEnd", always = true)
-            WorkspaceController.endDrag()
+            if (NativeHandoff.capturesInput) NativeHandoff.endDrag() else WorkspaceController.endDrag()
         }
-        binding.trackpad.onDragCancel = { WorkspaceController.cancelDrag() }
+        binding.trackpad.onDragCancel = {
+            if (NativeHandoff.capturesInput) NativeHandoff.cancelDrag() else WorkspaceController.cancelDrag()
+        }
         binding.trackpad.onLongPress = {
             InputDiagnostics.note(trackpadPath, "longPress", always = true)
-            WorkspaceController.longPress()
+            if (NativeHandoff.capturesInput) NativeHandoff.longPress() else WorkspaceController.longPress()
         }
+        binding.flatBack.setOnClickListener { NativeHandoff.back() }
+        binding.flatHome.setOnClickListener { NativeHandoff.home() }
+        binding.flatPlayPause.setOnClickListener { NativeHandoff.playPause() }
+        binding.flatVolDown.setOnClickListener { NativeHandoff.volume(raise = false) }
+        binding.flatVolUp.setOnClickListener { NativeHandoff.volume(raise = true) }
+        binding.flatNotice.setOnClickListener { NativeHandoff.clearNotice() }
+        binding.flatReturn.setOnClickListener { NativeHandoff.returnToWorkspace("phone button") }
+        NativeHandoff.attachHost(this)
+        NativeHandoff.addListener(handoffListener)
         WorkspaceController.typingTargetChanged = { displayId, pkg ->
             InputDiagnostics.typingTarget(displayId, pkg)
         }
@@ -480,6 +495,8 @@ class MainActivity : ComponentActivity() {
             override fun afterTextChanged(s: Editable?) {
                 val current = s?.toString().orEmpty()
                 when {
+                    NativeHandoff.inputDisplayId >= 0 ->
+                        forwardKeyboardDelta(NativeHandoff.inputDisplayId, lastKeyboardText, current)
                     WorkspaceController.isDrawerOpen ->
                         WorkspaceController.setDrawerSearchQuery(current)
                     focusedAppDisplayId >= 0 ->
@@ -557,6 +574,9 @@ class MainActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
+        if (intent.action == HandoffNotifier.ACTION_RETURN) {
+            NativeHandoff.returnToWorkspace("notification action")
+        }
         if (intent.action == UsbManager.ACTION_USB_DEVICE_ATTACHED) {
             val dev = intent.getParcelableExtra<android.hardware.usb.UsbDevice>(UsbManager.EXTRA_DEVICE)
             Log.i(
@@ -757,9 +777,13 @@ class MainActivity : ComponentActivity() {
         // re-attempt bring-up. Idempotent and no-op once READY.
         PrivilegedService.ensureRunning()
         syncGlasses()
+        NativeHandoff.onHostResumed()
+        NativeHandoff.recoverStaleDisplay(this)
     }
 
     override fun onDestroy() {
+        NativeHandoff.removeListener(handoffListener)
+        NativeHandoff.detachHost(this)
         displayManager().unregisterDisplayListener(displayListener)
         runCatching { inputManager().unregisterInputDeviceListener(keyboardPresenceListener) }
         presentation?.dismiss()
@@ -788,11 +812,56 @@ class MainActivity : ComponentActivity() {
         binding.zoomHud.postDelayed(hudHideRunnable, ZOOM_HUD_HIDE_MS)
     }
 
+    private val handoffListener: () -> Unit = { renderFlatBar(); renderStatus() }
+
+    private fun renderFlatBar() {
+        binding.flatNotice.text = NativeHandoff.notice
+        binding.flatNotice.visibility = if (NativeHandoff.notice.isEmpty()) View.GONE else View.VISIBLE
+        val s = NativeHandoff.session
+        val show = NativeHandoff.phase == NativeHandoff.Phase.ACTIVE && s != null && s.mode == FlatMode.FLAT_TRACKPAD
+        binding.flatBar.visibility = if (show) View.VISIBLE else View.GONE
+        if (s != null) {
+            binding.flatTitle.text = when (NativeHandoff.phase) {
+                NativeHandoff.Phase.STARTING -> "Opening ${s.label} flat on the glasses…"
+                NativeHandoff.Phase.RETURNING -> "Returning to the workspace…"
+                else -> "${s.label} is flat on the glasses. The trackpad below is its mouse."
+            }
+        }
+    }
+
+    override val context: Context get() = this
+
+    override fun glassesDisplay(): android.view.Display? = GlassesDisplay.find(this)
+
+    override fun setWorkspacePassive(passive: Boolean) {
+        presentation?.setPassive(passive)
+    }
+
+    override fun suspendWorkspace() {
+        presentation?.dismiss()
+        presentation = null
+    }
+
+    override fun resumeWorkspace() {
+        syncGlasses()
+    }
+
+    override fun bringHostToFront() {
+        startActivity(
+            Intent(this, MainActivity::class.java)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT),
+        )
+    }
+
     private fun displayManager(): DisplayManager =
         getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
 
     /** Show the workspace on the glasses while they are connected; refresh the active scene. */
     private fun syncGlasses() {
+        if (NativeHandoff.workspaceSuspended) {
+            renderStatus()
+            return
+        }
         val display = GlassesDisplay.find(this)
         if (display != null) {
             val current = presentation
@@ -801,7 +870,10 @@ class MainActivity : ComponentActivity() {
             ) {
                 current?.dismiss()
                 presentation = try {
-                    WorkspacePresentation(this, display).also { it.show() }
+                    WorkspacePresentation(this, display).also {
+                        it.show()
+                        if (NativeHandoff.wantsWorkspacePassive) it.setPassive(true)
+                    }
                 } catch (e: android.view.WindowManager.BadTokenException) {
                     // Common during a glasses connect/disconnect race — the display
                     // briefly exists but isn't trusted yet; the next syncGlasses retry
@@ -856,7 +928,7 @@ class MainActivity : ComponentActivity() {
      * glasses are connected, and populate the wizard with its current step.
      */
     private fun renderStatus() {
-        val glassesShowing = presentation?.isShowing == true
+        val glassesShowing = presentation?.isShowing == true || NativeHandoff.phase != NativeHandoff.Phase.IDLE
         val setupScene = PrivilegedService.state to glassesShowing
         if (setupScene != lastLoggedSetupScene) {
             Log.d(
@@ -1090,6 +1162,15 @@ class MainActivity : ComponentActivity() {
             KeyEvent.KEYCODE_BRIGHTNESS_UP, KeyEvent.KEYCODE_BRIGHTNESS_DOWN,
             -> return skip("system key ${KeyEvent.keyCodeToString(event.keyCode)} left to Android")
         }
+        val flatTarget = NativeHandoff.inputDisplayId
+        if (flatTarget >= 0) {
+            if (!InputDiagnostics.isHelperReady()) return skip("input helper not connected")
+            PrivilegedService.injectKey(flatTarget, event.keyCode, event.action, event.metaState)
+            if (isDown && event.repeatCount == 0) {
+                InputDiagnostics.note(kbPath, "forwarded", "${KeyEvent.keyCodeToString(event.keyCode)} -> flat display $flatTarget")
+            }
+            return true
+        }
         if (WorkspaceController.isDrawerOpen) return skip("app drawer is open: typing goes to its search")
         val target = if (focusedAppDisplayId >= 0) focusedAppDisplayId else InputDiagnostics.typingTargetDisplay()
         if (target < 0) return skip("no app window selected: click inside an app first")
@@ -1195,7 +1276,8 @@ class MainActivity : ComponentActivity() {
                 WorkspaceController.pinch(factor)
             } else {
                 InputDiagnostics.note(InputDiagnostics.Path.MOUSE, "wheel", "v=$v")
-                WorkspaceController.scroll(v * MOUSE_SCROLL_GAIN, InputDiagnostics.Path.MOUSE)
+                if (NativeHandoff.capturesInput) NativeHandoff.scrollFraction(v * MOUSE_SCROLL_GAIN)
+                else WorkspaceController.scroll(v * MOUSE_SCROLL_GAIN, InputDiagnostics.Path.MOUSE)
             }
         }
         // All other mouse events (HOVER_MOVE, MOVE, BUTTON_PRESS / RELEASE) fall

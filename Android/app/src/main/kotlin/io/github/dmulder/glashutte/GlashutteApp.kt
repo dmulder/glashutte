@@ -11,6 +11,7 @@ import io.github.dmulder.glashutte.desktop.DesktopShortcutsStore
 import io.github.dmulder.glashutte.desktop.DesktopWallpaperStore
 import io.github.dmulder.glashutte.desktop.WorkspaceSettings
 import io.github.dmulder.glashutte.privileged.PrivilegedHotkeys
+import io.github.dmulder.glashutte.handoff.NativeHandoff
 import io.github.dmulder.glashutte.privileged.PrivilegedService
 import io.github.dmulder.glashutte.spatial.WorkspaceController
 import io.github.dmulder.glashutte.spatial.WorkspaceController.ToolbarIcons
@@ -68,6 +69,11 @@ class GlashutteApp : Application() {
         SystemStatus.init(this)
         WorkspaceSettings.init(this)
         io.github.dmulder.glashutte.glasses.GlassesDiagnostics.init(this)
+        io.github.dmulder.glashutte.glasses.FlatAppStore.init(this)
+        io.github.dmulder.glashutte.handoff.FlatLog.init(this)
+        WorkspaceController.flatRouter = { pkg, activity, label ->
+            NativeHandoff.routeIfListed(pkg, activity, label)
+        }
         DesktopShortcutsStore.init(this)
         DesktopWallpaperStore.init(this)
         loadInputAndViewSettings()
@@ -198,7 +204,18 @@ class GlashutteApp : Application() {
         // sensitivity 1.0, ~800 ticks crosses a full NDC unit — roughly mirrors
         // the trackpad's "full sweep ≈ one screen" feel; cursorSensitivity
         // multiplies on top in WorkspaceController.moveCursor.
-        PrivilegedService.mouseDeltaHandler = { dx, dy, wheel ->
+        PrivilegedService.mouseDeltaHandler = handler@{ dx, dy, wheel ->
+            if (NativeHandoff.capturesInput) {
+                if (dx != 0 || dy != 0) {
+                    if (mousePrimaryDown && !mouseDragging) {
+                        mouseDragging = true
+                        NativeHandoff.beginDrag()
+                    }
+                    NativeHandoff.moveTicks(dx, dy)
+                }
+                if (wheel != 0) NativeHandoff.scrollFraction(wheel * RAW_MOUSE_WHEEL_GAIN)
+                return@handler
+            }
             if (dx != 0 || dy != 0) {
                 // First motion while the primary button is held — fire beginDrag
                 // BEFORE applying the delta to the cursor. The renderer's
@@ -235,7 +252,9 @@ class GlashutteApp : Application() {
                 // Right-click opens the desktop context menu (Arrange icons,
                 // Change wallpaper, Settings, etc.). Only on press — release is
                 // a no-op so a single press+release shows the menu once.
-                BTN_RIGHT -> if (pressed) WorkspaceController.requestRightClick()
+                BTN_RIGHT -> if (pressed) {
+                    if (NativeHandoff.capturesInput) NativeHandoff.back() else WorkspaceController.requestRightClick()
+                }
                 // Middle is consumed (system never sees it) but no action yet.
             }
         }
@@ -274,6 +293,10 @@ class GlashutteApp : Application() {
                     // cycleLayout already early-returns in PINNED — safe to call always.
                     val next = WorkspaceController.cycleLayout()
                     Log.i(HOTKEY_TAG, "Ctrl+Alt+A (cycle layout -> $next)")
+                }
+                PrivilegedHotkeys.HK_RETURN_TO_WORKSPACE -> {
+                    Log.i(HOTKEY_TAG, "Ctrl+Alt+H (return to workspace from a flat app)")
+                    NativeHandoff.returnToWorkspace("Ctrl+Alt+H")
                 }
                 PrivilegedHotkeys.HK_MODIFIERS_DOWN -> {
                     WorkspaceController.legendVisible = true
@@ -360,11 +383,13 @@ class GlashutteApp : Application() {
         mousePrimaryDown = false
         if (mouseDragging) {
             mouseDragging = false
-            WorkspaceController.endDrag()
+            if (NativeHandoff.capturesInput) NativeHandoff.endDrag() else WorkspaceController.endDrag()
             return
         }
         val held = android.os.SystemClock.uptimeMillis() - mousePrimaryDownAtMs
-        if (held in 0..MOUSE_CLICK_MAX_MS) {
+        if (held in 0..MOUSE_CLICK_MAX_MS && NativeHandoff.capturesInput) {
+            NativeHandoff.tap()
+        } else if (held in 0..MOUSE_CLICK_MAX_MS) {
             WorkspaceController.click(io.github.dmulder.glashutte.glasses.InputDiagnostics.Path.MOUSE)
         } else {
             io.github.dmulder.glashutte.glasses.InputDiagnostics.note(

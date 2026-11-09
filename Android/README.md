@@ -51,6 +51,10 @@ A stock, non-rooted Android app, which bounds what is possible:
   cursor, two fingers scroll, hold-to-drag, etc.). A Bluetooth mouse / keyboard works
   too — the privileged helper grabs the mouse via `EVIOCGRAB` so the phone's system UI
   never sees the events, and the cursor lives entirely inside the workspace.
+- **Protected (DRM) video cannot appear in the workspace.** Android blanks it on virtual
+  displays. Apps on the editable always-flat list (Netflix, Prime Video and so on) open on the
+  glasses' own display instead, with the phone as their trackpad. See
+  [`docs/DRM-NATIVE-HANDOFF.md`](docs/DRM-NATIVE-HANDOFF.md).
 
 ---
 

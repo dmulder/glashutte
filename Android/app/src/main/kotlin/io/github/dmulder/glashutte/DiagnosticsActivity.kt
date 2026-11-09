@@ -57,6 +57,7 @@ import java.util.concurrent.TimeUnit
 class DiagnosticsActivity : Activity() {
 
     private val handler = Handler(Looper.getMainLooper())
+    private val drm = DrmSection(this)
     private lateinit var reportView: TextView
     private lateinit var helperView: TextView
     private lateinit var hereView: TextView
@@ -91,6 +92,7 @@ class DiagnosticsActivity : Activity() {
 
         root.addView(label("Glashutte diagnostics", 18f, bold = true))
         addInputSection(root)
+        drm.addTo(root)
         root.addView(label("Head tracking: open this while the glasses are connected and the workspace is up, wait ~15 s, then Share log.", 12f))
 
         val buttons = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
@@ -154,13 +156,14 @@ class DiagnosticsActivity : Activity() {
             setTextColor(Color.rgb(220, 220, 220))
             setTextIsSelectable(true)
         }
-        val scroll = ScrollView(this).apply { addView(reportView) }
-        root.addView(scroll, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
-        setContentView(root)
+        root.addView(reportView)
+        // The screen has grown well past one page, so the whole thing scrolls.
+        setContentView(ScrollView(this).apply { isFillViewport = true; addView(root) })
     }
 
     override fun onResume() {
         super.onResume()
+        drm.onResume()
         handler.post(refresh)
     }
 
@@ -379,6 +382,7 @@ class DiagnosticsActivity : Activity() {
     }
 
     override fun onPause() {
+        drm.onPause()
         handler.removeCallbacks(refresh)
         super.onPause()
     }
@@ -386,6 +390,7 @@ class DiagnosticsActivity : Activity() {
     private fun fullLog(): String {
         refreshHelperReportBlocking()
         val sb = StringBuilder(GlassesDiagnostics.report(includeEvents = true, includeSdkLog = true))
+        sb.append(drm.reportText())
         sb.append("\n\n-- logcat (this app, tracking-related tags) --\n")
         sb.append(readLogcat())
         return sb.toString()

@@ -285,6 +285,103 @@
                 android:src="@drawable/ic_keyboard" />
         </LinearLayout>
 
+        <!-- Why a flat launch was abandoned (tap to dismiss). -->
+        <TextView
+            android:id="@+id/flatNotice"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginHorizontal="16dp"
+            android:layout_marginBottom="12dp"
+            android:background="#553300"
+            android:padding="12dp"
+            android:textColor="@color/text"
+            android:textSize="14sp"
+            android:visibility="gone" />
+
+        <!-- Quick controls shown while an app runs flat on the glasses (native handoff). -->
+        <LinearLayout
+            android:id="@+id/flatBar"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginHorizontal="16dp"
+            android:layout_marginBottom="16dp"
+            android:background="@color/surface"
+            android:orientation="vertical"
+            android:padding="8dp"
+            android:visibility="gone">
+
+            <TextView
+                android:id="@+id/flatTitle"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:paddingHorizontal="8dp"
+                android:paddingBottom="6dp"
+                android:textColor="@color/text"
+                android:textSize="14sp" />
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal">
+
+                <Button
+                    android:id="@+id/flatBack"
+                    style="?android:attr/buttonBarButtonStyle"
+                    android:layout_width="0dp"
+                    android:layout_height="52dp"
+                    android:layout_weight="1"
+                    android:minWidth="0dp"
+                    android:text="@string/flat_back"
+                    android:textColor="@color/text" />
+
+                <Button
+                    android:id="@+id/flatHome"
+                    style="?android:attr/buttonBarButtonStyle"
+                    android:layout_width="0dp"
+                    android:layout_height="52dp"
+                    android:layout_weight="1"
+                    android:minWidth="0dp"
+                    android:text="@string/flat_home"
+                    android:textColor="@color/text" />
+
+                <Button
+                    android:id="@+id/flatPlayPause"
+                    style="?android:attr/buttonBarButtonStyle"
+                    android:layout_width="0dp"
+                    android:layout_height="52dp"
+                    android:layout_weight="1"
+                    android:minWidth="0dp"
+                    android:text="@string/flat_play_pause"
+                    android:textColor="@color/text" />
+
+                <Button
+                    android:id="@+id/flatVolDown"
+                    style="?android:attr/buttonBarButtonStyle"
+                    android:layout_width="0dp"
+                    android:layout_height="52dp"
+                    android:layout_weight="1"
+                    android:minWidth="0dp"
+                    android:text="@string/flat_vol_down"
+                    android:textColor="@color/text" />
+
+                <Button
+                    android:id="@+id/flatVolUp"
+                    style="?android:attr/buttonBarButtonStyle"
+                    android:layout_width="0dp"
+                    android:layout_height="52dp"
+                    android:layout_weight="1"
+                    android:minWidth="0dp"
+                    android:text="@string/flat_vol_up"
+                    android:textColor="@color/text" />
+            </LinearLayout>
+
+            <Button
+                android:id="@+id/flatReturn"
+                android:layout_width="match_parent"
+                android:layout_height="52dp"
+                android:text="@string/flat_return" />
+        </LinearLayout>
+
         <FrameLayout
             android:layout_width="match_parent"
             android:layout_height="0dp"

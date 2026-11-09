@@ -140,6 +140,28 @@ class WorkspacePresentation(
         headTracking?.start()
     }
 
+    /**
+     * Make the workspace window fully transparent and untouchable (or restore it). Used while an
+     * app runs flat on the glasses' display: the workspace stays alive underneath (so returning
+     * to it is instant and nothing is torn down), but it no longer covers the app and, with a
+     * zero-alpha layer, SurfaceFlinger composites nothing for it.
+     */
+    fun setPassive(passive: Boolean) {
+        val w = window ?: return
+        val attrs = w.attributes
+        if (passive) {
+            attrs.alpha = 0f
+            attrs.flags = attrs.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+        } else {
+            attrs.alpha = 1f
+            attrs.flags = attrs.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE.inv() and
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE.inv()
+        }
+        w.attributes = attrs
+        GlassesDiagnostics.i(GlassesDiagnostics.TAG, "workspace window passive=$passive (alpha=${attrs.alpha})")
+    }
+
     override fun onStop() {
         surfaceView?.onPause()
         super.onStop()

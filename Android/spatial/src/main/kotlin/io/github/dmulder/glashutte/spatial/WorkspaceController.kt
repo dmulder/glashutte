@@ -416,11 +416,19 @@ object WorkspaceController {
     }
 
     /**
+     * Hook for the "always flat" list: return `true` when the app was handed to the native
+     * handoff (flat on the glasses' own display) instead of opening a workspace window. Wired
+     * by the app module; `null` means every app opens in the workspace.
+     */
+    @Volatile var flatRouter: ((packageName: String, activityName: String, label: String) -> Boolean)? = null
+
+    /**
      * Open an app in a window on the workspace.
      *
      * @return `true` if a workspace was running, `false` if the glasses are not connected.
      */
     fun launchApp(packageName: String, activityName: String, label: String): Boolean {
+        if (flatRouter?.invoke(packageName, activityName, label) == true) return true
         val current = renderer
         android.util.Log.i(
             "Glashutte/Launch",

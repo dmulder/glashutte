@@ -128,4 +128,45 @@ interface IPrivilegedService {
      * input), wait for the dispatcher's result, and whether new displays get OWN_FOCUS.
      */
     void setInputConfig(int strategy, boolean waitForResult, boolean ownFocus) = 23;
+
+    // --- Native handoff and DRM / secure-display probe (ids 24+, additive). Each returns text
+    // (or "<code>\t<strategy>\t<detail>" where noted) so the app can show exactly what the
+    // platform said. See docs/DRM-NATIVE-HANDOFF.md.
+
+    /**
+     * What the shell uid can and cannot do about secure video: held permissions
+     * (CAPTURE_SECURE_VIDEO_OUTPUT, ADD_TRUSTED_DISPLAY, ...), whether it can create secure and
+     * trusted virtual displays, SurfaceFlinger / display HDCP and secure lines, and desktop-mode
+     * and XR feature flags. Read-only apart from a short-lived test display. Never throws.
+     */
+    String probeSecureDisplay() = 24;
+
+    /**
+     * Prepare a physical display (the glasses) for a flat app: remember its current size and
+     * density overrides, set the density to densityDpi and, when forcePanelSize is true and the
+     * display does not report 16:10, set the panel's native 1920x1200. Returns what it saw and did.
+     */
+    String handoffPrepare(int displayId, int densityDpi, boolean forcePanelSize) = 25;
+
+    /**
+     * `am start` the app fullscreen on displayId (a real display, not a Glashutte virtual one).
+     * Returns "<code>\t<strategy>\t<detail>" like the input calls.
+     */
+    String handoffLaunch(int displayId, String packageName, String activityName) = 26;
+
+    /** Undo handoffPrepare's size and density changes for displayId. Idempotent. */
+    String handoffRestore(int displayId) = 27;
+
+    /**
+     * Display facts used for the aspect-ratio and UI-size checks: `wm size/density -d`, the
+     * display's own dump section and the activity bounds on it. Never throws.
+     */
+    String displayFacts(int displayId) = 28;
+
+    /**
+     * Where is [packageName] right now relative to [displayId]: activity records per display,
+     * windows (visible / FLAG_SECURE / alpha) on that display, in a compact text whose first
+     * line is a machine-readable "SNAP verdict=..." header. Used to verify a flat launch.
+     */
+    String flatSnapshot(int displayId, String packageName) = 29;
 }
