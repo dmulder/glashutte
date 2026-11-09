@@ -448,6 +448,7 @@ class MainActivity : ComponentActivity(), NativeHandoff.Host {
         binding.flatPlayPause.setOnClickListener { NativeHandoff.playPause() }
         binding.flatVolDown.setOnClickListener { NativeHandoff.volume(raise = false) }
         binding.flatVolUp.setOnClickListener { NativeHandoff.volume(raise = true) }
+        binding.flatNotice.setOnClickListener { NativeHandoff.clearNotice() }
         binding.flatReturn.setOnClickListener { NativeHandoff.returnToWorkspace("phone button") }
         NativeHandoff.attachHost(this)
         NativeHandoff.addListener(handoffListener)
@@ -814,6 +815,8 @@ class MainActivity : ComponentActivity(), NativeHandoff.Host {
     private val handoffListener: () -> Unit = { renderFlatBar(); renderStatus() }
 
     private fun renderFlatBar() {
+        binding.flatNotice.text = NativeHandoff.notice
+        binding.flatNotice.visibility = if (NativeHandoff.notice.isEmpty()) View.GONE else View.VISIBLE
         val s = NativeHandoff.session
         val show = NativeHandoff.phase == NativeHandoff.Phase.ACTIVE && s != null && s.mode == FlatMode.FLAT_TRACKPAD
         binding.flatBar.visibility = if (show) View.VISIBLE else View.GONE
@@ -867,7 +870,10 @@ class MainActivity : ComponentActivity(), NativeHandoff.Host {
             ) {
                 current?.dismiss()
                 presentation = try {
-                    WorkspacePresentation(this, display).also { it.show() }
+                    WorkspacePresentation(this, display).also {
+                        it.show()
+                        if (NativeHandoff.wantsWorkspacePassive) it.setPassive(true)
+                    }
                 } catch (e: android.view.WindowManager.BadTokenException) {
                     // Common during a glasses connect/disconnect race — the display
                     // briefly exists but isn't trusted yet; the next syncGlasses retry

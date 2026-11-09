@@ -92,6 +92,30 @@ object DrmProbe {
         return Result(lastReport, summary)
     }
 
+    /**
+     * A short, current DRM/HDCP readout for one display, for logging right after a flat launch:
+     * Widevine level, MediaDrm connected/max HDCP, and the display's own flags. Logged by the
+     * caller as `DRM-PROBE flat-state ...`.
+     */
+    fun quickState(context: Context, display: Display?): String {
+        val scratch = StringBuilder()
+        val drm = probeWidevine(scratch)
+        val sb = StringBuilder()
+        sb.append("Widevine ").append(drm.securityLevel ?: "unavailable")
+            .append("; HDCP connected=").append(DrmVerdict.hdcpName(drm.connectedHdcp))
+            .append(" max=").append(DrmVerdict.hdcpName(drm.maxHdcp))
+        if (display == null) {
+            sb.append("; glasses display: none")
+        } else {
+            sb.append("; display ").append(display.displayId).append(" state=").append(display.state)
+                .append(" flags=0x").append(Integer.toHexString(display.flags)).append(' ').append(DrmVerdict.displayFlagNames(display.flags))
+                .append(" FLAG_SECURE=").append(display.flags and Display.FLAG_SECURE != 0)
+            val hidden = hiddenReadouts(display)
+            if (hidden.isNotEmpty()) sb.append("; hidden getters: ").append(hidden)
+        }
+        return sb.toString()
+    }
+
     private fun logStatement(statement: DrmVerdict.Statement) =
         GlassesDiagnostics.i(TAG, "DRM-PROBE ${statement.severity.name}: ${statement.text}")
 

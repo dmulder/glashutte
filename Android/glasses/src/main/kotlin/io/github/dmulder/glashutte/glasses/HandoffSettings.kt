@@ -44,9 +44,10 @@ object HandoffSettings {
 
     /**
      * Force the glasses display to the panel's native 1920x1200 when it reports something else
-     * (`wm size -d`). Default ON; a display that already reports 16:10 is left alone.
+     * (`wm size -d`). Default OFF until hardware confirms it never blanks the glasses; a display
+     * that already reports 16:10 is never changed either way.
      */
-    fun forcePanelSize(context: Context): Boolean = prefs(context).getBoolean(KEY_RESIZE, true)
+    fun forcePanelSize(context: Context): Boolean = prefs(context).getBoolean(KEY_RESIZE, false)
     fun setForcePanelSize(context: Context, value: Boolean) = prefs(context).edit().putBoolean(KEY_RESIZE, value).apply()
 
     /** Force-stop the app when returning to the workspace (so audio does not keep playing). Default ON. */

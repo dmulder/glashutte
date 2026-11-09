@@ -70,6 +70,7 @@ class GlashutteApp : Application() {
         WorkspaceSettings.init(this)
         io.github.dmulder.glashutte.glasses.GlassesDiagnostics.init(this)
         io.github.dmulder.glashutte.glasses.FlatAppStore.init(this)
+        io.github.dmulder.glashutte.handoff.FlatLog.init(this)
         WorkspaceController.flatRouter = { pkg, activity, label ->
             NativeHandoff.routeIfListed(pkg, activity, label)
         }

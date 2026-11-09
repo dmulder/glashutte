@@ -824,6 +824,23 @@ class PrivilegedServer() : IPrivilegedService.Stub() {
         "displayFacts failed: ${t.javaClass.simpleName}: ${t.message}"
     }
 
+    override fun flatSnapshot(displayId: Int, packageName: String): String = try {
+        val activities = runCapture("dumpsys", "activity", "activities")
+        val windows = runCapture("dumpsys", "window", "windows")
+        val result = io.github.dmulder.glashutte.glasses.FlatSnapshot.analyze(activities, windows, displayId, packageName)
+        val sb = StringBuilder(result.encode())
+        sb.append("wm size -d $displayId: ").append(runCapture("wm", "size", "-d", displayId.toString())?.trim()?.replace('\n', ';')).append('\n')
+        sb.append("wm density -d $displayId: ").append(runCapture("wm", "density", "-d", displayId.toString())?.trim()?.replace('\n', ';')).append('\n')
+        sb.append("dumpsys display (display $displayId):\n").append(DumpsysFilter.forDisplay(runCapture("dumpsys", "display"), displayId, 25)).append('\n')
+        sb.append("SurfaceFlinger lines mentioning the app / hdcp / secure:\n")
+            .append(grepLines(runCapture("dumpsys", "SurfaceFlinger"), Regex("(?i)" + Regex.escape(packageName) + "|hdcp|secure|protected"), 20)).append('\n')
+        if (activities == null) sb.append("(dumpsys activity activities could not be read)\n")
+        if (windows == null) sb.append("(dumpsys window windows could not be read)\n")
+        sb.toString()
+    } catch (t: Throwable) {
+        "flatSnapshot failed: ${t.javaClass.simpleName}: ${t.message}"
+    }
+
     // endregion
 
     /**

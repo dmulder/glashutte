@@ -171,6 +171,34 @@ Pixel 10 Pro XL, Android 17 CP3A.261005.005, with the Luma Ultra:
   "Draw a cursor" in Diagnostics.
 - Does HOME on a secondary display do anything, and does the phone-mirror path preserve DRM.
 
+## 4.1 Blank glasses after a flat launch: what the app now does
+
+Hardware report: opening Netflix flat showed the controls on the phone but the glasses went blank.
+The old flow only checked that an activity record existed on the glasses display, so it could not
+tell "app is showing" from "app is there but nothing is visible". Likely causes, none confirmed:
+a secure (FLAG_SECURE) Netflix window on a display that is not HDCP-secure, the forced 1920x1200
+panel size on a display that is not 16:10, a density change reconfiguring the display just before
+launch, the workspace presentation being recreated opaque on top of the app, or the task
+bouncing to another display. Changes:
+
+- The workspace window is only made passive (invisible, untouchable), never dismissed, in flat
+  mode, and is re-applied if the presentation is recreated. "Force panel size" is now OFF by
+  default.
+- After launch the helper snapshots `dumpsys activity activities` and `dumpsys window windows`
+  and decides: `VISIBLE_ON_DISPLAY`, `ON_DISPLAY_NOT_VISIBLE`, `ELSEWHERE`, `NOT_RUNNING` or
+  `ON_DISPLAY_UNVERIFIED`. It polls at 1.2, 2.7, 4.5 and 6.7 s. If it never passes, the app is
+  force-stopped, the display size is restored, and the phone-mirror mode is used (for a normal
+  open) or the workspace is restored (for tests). A notice is shown on the phone.
+- Each attempt writes `FLAT-ROUTE` lines (display id, task display, windows on the glasses display,
+  secure flag, HDCP, `wm size/density`, SurfaceFlinger lines) and `DRM-PROBE flat-state` lines
+  (Widevine level, HDCP connected/max, display flags). They also go to a persistent file,
+  `flat-handoff.log`, which Share log includes. Late snapshots are taken 4 s and 12 s after
+  launch.
+- Diagnostics has a "FLAT BLANK TEST" block: **1. Flat test: Settings** (a non-DRM app through
+  exactly the same path) and **2. Same, no display changes** (skips `wm size/density`).
+  Settings blank too means a routing/display bug, not DRM. Settings fine and Netflix blank means
+  DRM/secure blanking.
+
 ## 5. Test procedure (for the owner)
 
 Setup: install the debug APK, pair the helper (Wireless Debugging) as usual, connect the glasses,
@@ -220,6 +248,14 @@ E. Aspect ratio and readable size (in B and D)
   `[OK] UI size: density 240 dpi -> 1280x800dp`, and `[OK] window fills display`.
 - If the shape is `WARN` or `FAIL`, or the UI is too small or large, change the density in "Flat
   mode settings" (the -/+ buttons) and repeat.
+
+E. Blank-glasses test (send this back)
+1. Diagnostics, "FLAT BLANK TEST": tap **1. Flat test: Settings**. Look at the glasses: Settings
+   full screen, workspace still showing, or black? Tap **Return to workspace now**.
+2. Tap **2. Same, no display changes**; same question.
+3. Open Netflix flat from the drawer; say what the glasses show, and whether the phone shows a notice.
+4. Scroll to **Share log** and send it with your three answers. Look for `FLAT-ROUTE` lines with
+   `SNAP verdict=` and `SECURE`.
 
 ## 6. Safety and limits
 

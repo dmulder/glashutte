@@ -162,4 +162,11 @@ interface IPrivilegedService {
      * display's own dump section and the activity bounds on it. Never throws.
      */
     String displayFacts(int displayId) = 28;
+
+    /**
+     * Where is [packageName] right now relative to [displayId]: activity records per display,
+     * windows (visible / FLAG_SECURE / alpha) on that display, in a compact text whose first
+     * line is a machine-readable "SNAP verdict=..." header. Used to verify a flat launch.
+     */
+    String flatSnapshot(int displayId, String packageName) = 29;
 }

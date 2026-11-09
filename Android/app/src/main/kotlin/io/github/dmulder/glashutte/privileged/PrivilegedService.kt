@@ -743,6 +743,9 @@ object PrivilegedService {
     fun handoffRestore(displayId: Int): String =
         helperText("helper not connected (state=$state)") { it.handoffRestore(displayId) }
 
+    fun flatSnapshot(displayId: Int, packageName: String): String =
+        helperText("helper not connected") { it.flatSnapshot(displayId, packageName) }
+
     fun displayFacts(displayId: Int): String =
         helperText("helper not connected (state=$state)") { it.displayFacts(displayId) }
 

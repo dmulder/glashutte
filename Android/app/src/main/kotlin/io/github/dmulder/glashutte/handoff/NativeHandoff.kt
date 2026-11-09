@@ -13,6 +13,8 @@ import android.widget.Toast
 import io.github.dmulder.glashutte.glasses.FlatAppStore
 import io.github.dmulder.glashutte.glasses.FlatFit
 import io.github.dmulder.glashutte.glasses.FlatMode
+import io.github.dmulder.glashutte.glasses.FlatSnapshot
+import io.github.dmulder.glashutte.glasses.DrmProbe
 import io.github.dmulder.glashutte.glasses.FlatPointer
 import io.github.dmulder.glashutte.glasses.GlassesDiagnostics
 import io.github.dmulder.glashutte.glasses.HandoffSettings
@@ -42,7 +44,11 @@ import java.util.concurrent.Executors
 object NativeHandoff {
 
     private const val TAG = GlassesDiagnostics.TAG
-    private const val SETTLE_MS = 1800L
+    private const val PREPARE_SETTLE_MS = 1200L
+
+    /** Waits before each check that the app is on the glasses display (about 7 s in all). */
+    private val VERIFY_WAITS_MS = longArrayOf(1200, 1500, 1800, 2200)
+    private val LATE_SNAPSHOTS_MS = longArrayOf(4000, 12000)
     private const val POLL_MS = 3000L
     private const val TAP_GAP_MS = 40L
     private const val LONG_PRESS_MS = 650L
@@ -81,6 +87,7 @@ object NativeHandoff {
     @Volatile var lastReport: String = "(no flat app has been started yet)"
         private set
 
+    @Volatile private var flatStarting = false
     private var pointer: FlatPointer? = null
     private var cursor: FlatCursorPresentation? = null
     private var dragging = false
@@ -106,9 +113,23 @@ object NativeHandoff {
 
     private fun changed() = main.post { listeners.forEach { runCatching { it() } } }
 
-    private fun note(message: String) {
-        GlassesDiagnostics.i(TAG, "NATIVE-HANDOFF: $message")
+    private fun note(message: String) = FlatLog.i("NATIVE-HANDOFF", message)
+    private fun route(message: String) = FlatLog.i("FLAT-ROUTE", message)
+
+    /** Shown on the phone after a flat launch was abandoned; cleared by the next launch or by tapping it. */
+    @Volatile var notice: String = ""
+        private set
+
+    fun clearNotice() {
+        notice = ""
+        changed()
     }
+
+    val hasHost: Boolean get() = host != null
+
+    /** True while the workspace window must stay see-through so it cannot cover a flat app. */
+    val wantsWorkspacePassive: Boolean
+        get() = flatStarting || (session?.mode == FlatMode.FLAT_TRACKPAD && phase == Phase.ACTIVE)
 
     /**
      * Entry point from the launcher: route [packageName] flat when the always-flat list says so.
@@ -124,18 +145,46 @@ object NativeHandoff {
         return true
     }
 
-    /** Launch [packageName] flat now (list or the "Open flat" action). Safe from any thread. */
-    fun launch(packageName: String, activityName: String, label: String, reason: String, requested: FlatMode? = null) {
-        main.post { startOnMain(packageName, activityName, label, reason, requested) }
+    /**
+     * Launch [packageName] flat now (list, "Open flat" or a Diagnostics test). Safe from any thread.
+     * [skipDisplayChanges] leaves the glasses display's size and density alone (a test that tells
+     * apart "the display change blanked it" from other causes). [allowMirrorFallback] false makes
+     * a failed flat launch restore the workspace instead of trying the phone mirror.
+     */
+    fun launch(
+        packageName: String,
+        activityName: String,
+        label: String,
+        reason: String,
+        requested: FlatMode? = null,
+        skipDisplayChanges: Boolean = false,
+        allowMirrorFallback: Boolean = true,
+    ) {
+        main.post { startOnMain(packageName, activityName, label, reason, requested, skipDisplayChanges, allowMirrorFallback) }
     }
 
-    private fun startOnMain(packageName: String, activityName: String, label: String, reason: String, requested: FlatMode?) {
-        val h = host ?: return
+    private fun startOnMain(
+        packageName: String,
+        activityName: String,
+        label: String,
+        reason: String,
+        requested: FlatMode?,
+        skipDisplayChanges: Boolean,
+        allowMirrorFallback: Boolean,
+    ) {
+        val h = host
+        if (h == null) {
+            notice = "Open Glashutte (with the glasses connected) first, then try again."
+            note("launch of $packageName ignored: the workspace host is not running")
+            changed()
+            return
+        }
         if (phase != Phase.IDLE) {
             Toast.makeText(h.context, "Return to the workspace before opening another flat app", Toast.LENGTH_SHORT).show()
             note("ignored launch of $packageName: phase=$phase")
             return
         }
+        notice = ""
         val target = HandoffSettings.target(h.context)
         val wanted = requested ?: FlatAppStore.modeFor(packageName)
         val plan = when (target) {
@@ -143,7 +192,11 @@ object NativeHandoff {
             HandoffSettings.Target.EXTERNAL_ONLY -> FlatMode.FLAT_TRACKPAD
             HandoffSettings.Target.AUTO -> wanted
         }
-        note("launching $packageName ($reason): app wants ${wanted.wire}, target setting ${target.name} -> plan ${plan.wire}")
+        route(
+            "==== launch $packageName ($reason): app wants ${wanted.wire}, target setting ${target.name} -> plan ${plan.wire}" +
+                (if (skipDisplayChanges) ", NO display size/density changes (test)" else "") +
+                (if (!allowMirrorFallback) ", no mirror fallback (test)" else ""),
+        )
         phase = Phase.STARTING
         changed()
         WorkspaceController.closeAppByPackage(packageName)
@@ -153,7 +206,11 @@ object NativeHandoff {
             return
         }
         when (plan) {
-            FlatMode.FLAT_TRACKPAD -> startFlat(h, display, packageName, activityName, label, target == HandoffSettings.Target.AUTO)
+            FlatMode.FLAT_TRACKPAD -> startFlat(
+                h, display, packageName, activityName, label,
+                mayFallBackToMirror = allowMirrorFallback && target == HandoffSettings.Target.AUTO,
+                skipDisplayChanges = skipDisplayChanges,
+            )
             FlatMode.MIRROR -> startMirror(h, display, packageName, activityName, label)
         }
     }
@@ -165,6 +222,7 @@ object NativeHandoff {
         activity: String,
         label: String,
         mayFallBackToMirror: Boolean,
+        skipDisplayChanges: Boolean,
     ) {
         if (!PrivilegedService.isHelperReady) {
             note("flat needs the shell helper and it is not connected")
@@ -172,41 +230,90 @@ object NativeHandoff {
             return
         }
         val ctx = h.context
-        h.setWorkspacePassive(true)
         val density = HandoffSettings.densityDpi(ctx)
         val forceSize = HandoffSettings.forcePanelSize(ctx)
+        flatStarting = true
+        h.setWorkspacePassive(true)
         worker.execute {
             val report = StringBuilder()
-            HandoffSettings.setDisplayChangePending(ctx, display.displayId)
-            val prepared = PrivilegedService.handoffPrepare(display.displayId, density, forceSize)
-            report.append("prepare display ${display.displayId}:\n").append(prepared.prependIndent("  ")).append('\n')
-            note("display prepared: ${prepared.replace('\n', ' ')}")
+            val m0 = DisplayMetrics().also { display.getRealMetrics(it) }
+            FlatLog.i(
+                "DRM-PROBE",
+                "flat-state BEFORE launch: display ${display.displayId} '${display.name}' ${m0.widthPixels}x${m0.heightPixels}@${m0.densityDpi}dpi " +
+                    "${"%.0f".format(display.refreshRate)}Hz; " + DrmProbe.quickState(ctx, display),
+            )
+            var displayChanged = false
+            if (skipDisplayChanges) {
+                note("display size/density left exactly as it is (test option)")
+                report.append("display changes: skipped (test)\n")
+            } else {
+                HandoffSettings.setDisplayChangePending(ctx, display.displayId)
+                val prepared = PrivilegedService.handoffPrepare(display.displayId, density, forceSize)
+                displayChanged = true
+                report.append("prepare display ${display.displayId}:\n").append(prepared.prependIndent("  ")).append('\n')
+                FlatLog.block("NATIVE-HANDOFF", "display prepare result", prepared)
+                SystemClock.sleep(PREPARE_SETTLE_MS)
+                val m1 = DisplayMetrics().also { display.getRealMetrics(it) }
+                note("display after prepare and ${PREPARE_SETTLE_MS}ms settle: ${m1.widthPixels}x${m1.heightPixels}@${m1.densityDpi}dpi state=${display.state}")
+            }
             val outcome = PrivilegedService.handoffLaunch(display.displayId, pkg, activity)
             report.append("launch: ").append(outcome).append('\n')
-            note("am start on display ${display.displayId} -> $outcome")
-            SystemClock.sleep(SETTLE_MS)
-            val landed = outcome.ok && PrivilegedService.displayHasActivity(display.displayId)
-            report.append("activity on display ${display.displayId} after ${SETTLE_MS}ms: $landed\n")
+            route("am start --display ${display.displayId} $pkg/$activity -> $outcome")
+
+            var snapshot = ""
+            var verdict: FlatSnapshot.Verdict? = null
+            if (outcome.ok) {
+                var waited = 0L
+                for ((i, wait) in VERIFY_WAITS_MS.withIndex()) {
+                    SystemClock.sleep(wait)
+                    waited += wait
+                    snapshot = PrivilegedService.flatSnapshot(display.displayId, pkg)
+                    verdict = FlatSnapshot.decodeVerdict(snapshot)
+                    route("verify #${i + 1} after ${waited}ms: ${snapshot.lineSequence().firstOrNull().orEmpty()}")
+                    if (FlatSnapshot.passes(verdict)) break
+                }
+                FlatLog.block("FLAT-ROUTE", "final snapshot for $pkg on display ${display.displayId}", snapshot, 120)
+            }
+            val landed = outcome.ok && FlatSnapshot.passes(verdict)
+            report.append("verified on display ${display.displayId}: $landed (${verdict ?: "no snapshot"})\n")
             if (!landed) {
-                val restored = PrivilegedService.handoffRestore(display.displayId)
-                HandoffSettings.setDisplayChangePending(ctx, -1)
-                note("flat launch failed (${outcome}); display restored: ${restored.replace('\n', ' ')}")
+                val why = when {
+                    !outcome.ok -> "am start was refused: $outcome"
+                    verdict == FlatSnapshot.Verdict.ELSEWHERE -> "the app started but not on the glasses display (the task bounced to another display)"
+                    verdict == FlatSnapshot.Verdict.NOT_RUNNING -> "the app is not running (it crashed, finished or never started)"
+                    verdict == FlatSnapshot.Verdict.ON_DISPLAY_NOT_VISIBLE -> "the app is on the glasses display but never showed a visible window"
+                    else -> "the app could not be verified on the glasses display ($verdict)"
+                }
+                route("FAILED: $why")
+                FlatLog.i("DRM-PROBE", "flat-state AFTER failed launch: " + DrmProbe.quickState(ctx, display))
+                PrivilegedService.forceStop(pkg)
+                if (displayChanged) {
+                    val restored = PrivilegedService.handoffRestore(display.displayId)
+                    HandoffSettings.setDisplayChangePending(ctx, -1)
+                    note("display restored: ${restored.replace('\n', ' ')}")
+                }
+                SystemClock.sleep(400)
                 main.post {
+                    flatStarting = false
                     h.setWorkspacePassive(false)
-                    lastReport = report.append("RESULT: flat launch failed\n").toString()
+                    lastReport = report.append("RESULT: flat launch failed: $why\n").toString()
                     if (mayFallBackToMirror) {
-                        note("falling back to phone mirror")
+                        notice = "$label did not open on the glasses ($why). Trying the phone mirror instead."
+                        note("falling back to the phone mirror")
                         startMirror(h, display, pkg, activity, label)
                     } else {
-                        fail(h, pkg, "the app did not start on the glasses display ($outcome)")
+                        notice = "$label did not open on the glasses: $why. The workspace is back."
+                        fail(h, pkg, why)
                     }
                 }
                 return@execute
             }
+            FlatLog.i("DRM-PROBE", "flat-state AFTER launch (app verified on display): " + DrmProbe.quickState(ctx, display))
             val facts = PrivilegedService.displayFacts(display.displayId)
             val fit = fitReport(display, facts)
             report.append("fit:\n").append(fit.prependIndent("  ")).append('\n')
             main.post {
+                flatStarting = false
                 val s = Session(pkg, activity, label, FlatMode.FLAT_TRACKPAD, display.displayId, SystemClock.elapsedRealtime())
                 session = s
                 val metrics = DisplayMetrics().also { display.getRealMetrics(it) }
@@ -218,9 +325,20 @@ object NativeHandoff {
                 emptyPolls = 0
                 main.postDelayed(pollRunnable, POLL_MS)
                 lastReport = report.append("RESULT: flat + trackpad active\n").toString()
-                note("ACTIVE flat+trackpad pkg=$pkg display=${display.displayId} ${metrics.widthPixels}x${metrics.heightPixels}@${metrics.densityDpi}dpi")
+                route("ACTIVE flat+trackpad pkg=$pkg display=${display.displayId} ${metrics.widthPixels}x${metrics.heightPixels}@${metrics.densityDpi}dpi (window visible: if the glasses are still blank, the platform is hiding it: see SECURE in the snapshot)")
+                for (delay in LATE_SNAPSHOTS_MS) main.postDelayed({ logLateSnapshot(s, display) }, delay)
                 changed()
             }
+        }
+    }
+
+    private fun logLateSnapshot(s: Session, display: Display) {
+        if (session !== s || phase != Phase.ACTIVE) return
+        val ctx = host?.context ?: return
+        worker.execute {
+            val snap = PrivilegedService.flatSnapshot(display.displayId, s.packageName)
+            route("still-there check: ${snap.lineSequence().firstOrNull().orEmpty()}")
+            FlatLog.i("DRM-PROBE", "flat-state while running: " + DrmProbe.quickState(ctx, display))
         }
     }
 
@@ -247,12 +365,21 @@ object NativeHandoff {
         HandoffNotifier.show(ctx, label, "Mirroring the phone screen; tap to return to the workspace")
         phase = Phase.ACTIVE
         note("ACTIVE mirror pkg=$pkg (app on the phone display, glasses mirror it)")
+        FlatLog.i("DRM-PROBE", "mirror-state: glasses display ${display.displayId} " + DrmProbe.quickState(ctx, display))
+        main.postDelayed({
+            worker.execute {
+                val snap = PrivilegedService.flatSnapshot(Display.DEFAULT_DISPLAY, pkg)
+                FlatLog.block("FLAT-ROUTE", "mirror: where $pkg is (display 0 = phone)", snap, 60)
+            }
+        }, 2500)
         changed()
     }
 
     private fun fail(h: Host, pkg: String, why: String) {
         note("FAILED $pkg: $why")
+        if (notice.isEmpty()) notice = "Could not open $pkg flat: $why"
         Toast.makeText(h.context, "Could not open flat: $why", Toast.LENGTH_LONG).show()
+        flatStarting = false
         phase = Phase.IDLE
         session = null
         changed()

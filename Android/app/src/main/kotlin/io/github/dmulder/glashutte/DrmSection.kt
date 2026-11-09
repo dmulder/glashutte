@@ -24,6 +24,7 @@ import io.github.dmulder.glashutte.glasses.FlatMode
 import io.github.dmulder.glashutte.glasses.GlassesDiagnostics
 import io.github.dmulder.glashutte.glasses.GlassesDisplay
 import io.github.dmulder.glashutte.glasses.HandoffSettings
+import io.github.dmulder.glashutte.handoff.FlatLog
 import io.github.dmulder.glashutte.handoff.NativeHandoff
 import io.github.dmulder.glashutte.handoff.SecureLayerTest
 import io.github.dmulder.glashutte.privileged.PrivilegedService
@@ -39,12 +40,19 @@ class DrmSection(private val activity: Activity) {
     private lateinit var summary: TextView
     private lateinit var probeText: TextView
     private lateinit var testResult: TextView
+    private lateinit var flatStatus: TextView
     private lateinit var listBox: LinearLayout
     private lateinit var targetButton: Button
     private lateinit var densityLabel: TextView
     private lateinit var defaultModeButton: Button
     private val flatListener: () -> Unit = { handler.post { renderList(); renderSummary() } }
-    private val handoffListener: () -> Unit = { renderSummary() }
+    private val handoffListener: () -> Unit = { renderSummary(); handler.post { flatStatus.text = flatStatusText() } }
+
+    private fun flatStatusText(): String =
+        "Flat state: ${NativeHandoff.phase.name.lowercase()}" +
+            (NativeHandoff.session?.let { " (${it.label}, ${it.mode.wire}, display ${it.displayId})" } ?: "") +
+            (if (NativeHandoff.notice.isNotEmpty()) "\n" + NativeHandoff.notice else "") +
+            "\nlast run: " + NativeHandoff.lastReport.lineSequence().lastOrNull { it.startsWith("RESULT") }.orEmpty()
 
     fun addTo(root: LinearLayout) {
         FlatAppStore.init(activity.applicationContext)
@@ -66,6 +74,17 @@ class DrmSection(private val activity: Activity) {
         root.addView(row(button("Widevine test: phone") { widevine(onGlasses = false) }, button("Widevine test: glasses (flat)") { widevine(onGlasses = true) }))
         testResult = label("", 11f)
         root.addView(testResult)
+
+        root.addView(label("FLAT BLANK TEST: does a normal (non-DRM) app show on the glasses? Run these in order, then Share log.", 12f, bold = true))
+        root.addView(
+            row(
+                button("1. Flat test: Settings") { flatTest(skipDisplayChanges = false) },
+                button("2. Same, no display changes") { flatTest(skipDisplayChanges = true) },
+            ),
+        )
+        root.addView(button("Return to workspace now") { NativeHandoff.returnToWorkspace("Diagnostics button") })
+        flatStatus = label("", 11f)
+        root.addView(flatStatus)
 
         root.addView(label("Always-flat apps (they open flat on the glasses; tap a mode to switch flat+trackpad / phone mirror)", 12f, bold = true))
         root.addView(
@@ -121,6 +140,7 @@ class DrmSection(private val activity: Activity) {
         FlatAppStore.addChangeListener(flatListener)
         NativeHandoff.addListener(handoffListener)
         renderSummary()
+        flatStatus.text = flatStatusText()
     }
 
     fun onPause() {
@@ -144,6 +164,8 @@ class DrmSection(private val activity: Activity) {
             .append(" pendingDisplayRestore=").append(HandoffSettings.displayChangePending(activity))
             .append('\n')
         append("last handoff:\n").append(NativeHandoff.lastReport.prependIndent("  ")).append('\n')
+        append("\n-- flat-launch log (FLAT-ROUTE / DRM-PROBE / NATIVE-HANDOFF, also in GlashutteDiag) --\n")
+        append(FlatLog.read()).append('\n')
         append("\n-- always-flat list (enabled=").append(FlatAppStore.enabled)
             .append(" defaultMode=").append(FlatAppStore.defaultMode.wire).append(") --\n")
         FlatAppStore.entries().forEach {
@@ -241,24 +263,52 @@ class DrmSection(private val activity: Activity) {
             .show()
     }
 
-    private fun openFlatNow(packageName: String, label: String) {
-        val launch = activity.packageManager.getLaunchIntentForPackage(packageName)
-        val component = launch?.component
+    private fun openFlatNow(packageName: String, label: String) = startFlat(packageName, label, "Diagnostics: Open", skipDisplayChanges = false, allowMirrorFallback = true)
+
+    /** Settings is a normal, non-protected app: if it is blank too, the problem is routing, not DRM. */
+    private fun flatTest(skipDisplayChanges: Boolean) {
+        val pkg = listOf("com.android.settings", "com.android.chrome")
+            .firstOrNull { activity.packageManager.getLaunchIntentForPackage(it) != null }
+        if (pkg == null) {
+            toast("Neither Settings nor Chrome has a launcher entry")
+            return
+        }
+        startFlat(
+            pkg, if (pkg == "com.android.settings") "Settings" else "Chrome",
+            "Diagnostics flat test (non-DRM)" + if (skipDisplayChanges) ", no display changes" else "",
+            skipDisplayChanges = skipDisplayChanges, allowMirrorFallback = false,
+        )
+    }
+
+    private fun startFlat(packageName: String, label: String, reason: String, skipDisplayChanges: Boolean, allowMirrorFallback: Boolean) {
+        val component = activity.packageManager.getLaunchIntentForPackage(packageName)?.component
         if (component == null) {
             toast("$label is not installed")
             return
         }
-        val host = GlassesDisplay.find(activity)
-        if (host == null) {
+        if (GlassesDisplay.find(activity) == null) {
             toast("Connect the glasses first")
             return
         }
         activity.startActivity(
             Intent(activity, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP),
         )
-        handler.postDelayed({
-            NativeHandoff.launch(packageName, component.className, label, "Diagnostics: Open")
-        }, 900)
+        var tries = 0
+        val launcher = object : Runnable {
+            override fun run() {
+                if (NativeHandoff.hasHost || tries++ >= 10) {
+                    NativeHandoff.launch(
+                        packageName, component.className, label, reason,
+                        requested = FlatMode.FLAT_TRACKPAD,
+                        skipDisplayChanges = skipDisplayChanges,
+                        allowMirrorFallback = allowMirrorFallback,
+                    )
+                } else {
+                    handler.postDelayed(this, 500)
+                }
+            }
+        }
+        handler.postDelayed(launcher, 900)
     }
 
     private fun runProbe() {
